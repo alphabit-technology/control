@@ -1,0 +1,6 @@
+{
+  "__document_status__": "Active",
+  "name": "Stripe Webhook",
+  "module": "stripe",
+  "__ENTITY__": "Controller Builder"
+}

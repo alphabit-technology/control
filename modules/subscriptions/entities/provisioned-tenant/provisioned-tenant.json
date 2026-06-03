@@ -1,0 +1,19 @@
+{
+  "id": null,
+  "name": "Provisioned Tenant",
+  "module": "subscriptions",
+  "default_list_view": "List",
+  "is_single": 0,
+  "is_static": 0,
+  "include_in_installer": 0,
+  "is_child": 0,
+  "is_builder": 0,
+  "__document_status__": "Active",
+  "doc_structure": "[{\"element\":\"row\",\"data\":{\"name\":\"row_name\",\"key\":\"row_name\",\"layout\":\"[100]\"},\"elements\":[{\"element\":\"col\",\"data\":{\"name\":\"col_name\",\"key\":\"col_name\"},\"elements\":[{\"element\":\"input\",\"data\":{\"name\":\"name\",\"label\":\"Tenant Name\",\"key\":\"name\",\"id\":\"name\",\"type\":\"text\",\"required\":1,\"unique\":1,\"set_only_time\":1,\"in_list_view\":1,\"searchable\":1,\"description\":\"The tenant this record governs (matches sites/<name>/).\"}}]}]},{\"element\":\"row\",\"data\":{\"name\":\"row_secret\",\"key\":\"row_secret\",\"layout\":\"[50,50]\"},\"elements\":[{\"element\":\"col\",\"data\":{\"name\":\"col_verifier\"},\"elements\":[{\"element\":\"password\",\"data\":{\"name\":\"verifier_token\",\"label\":\"Verifier Token\",\"key\":\"verifier_token\",\"id\":\"verifier_token\",\"description\":\"Per-tenant server-to-server shared secret. Matches the tenant CLOUD_VERIFIER_TOKEN env.\"}}]},{\"element\":\"col\",\"data\":{\"name\":\"col_email\"},\"elements\":[{\"element\":\"input\",\"data\":{\"name\":\"customer_email\",\"label\":\"Customer Email\",\"key\":\"customer_email\",\"id\":\"customer_email\",\"format\":\"email\",\"in_list_view\":1}}]}]},{\"element\":\"row\",\"data\":{\"name\":\"name_and_status_container\",\"key\":\"name_and_status_container\",\"layout\":\"[50,50]\"},\"elements\":[]}]",
+  "resources": [],
+  "deleted_at": null,
+  "__created_at__": null,
+  "__updated_at__": null,
+  "__deleted_at__": null,
+  "__ENTITY__": "Entity"
+}

@@ -1,0 +1,15 @@
+{
+  "name": "Stripe Account",
+  "module": "stripe",
+  "default_list_view": "List",
+  "is_single": 1,
+  "is_static": 0,
+  "include_in_installer": 0,
+  "is_child": 0,
+  "is_builder": 0,
+  "doc_structure": "[{\"node\":\"row_account\",\"element\":\"row\",\"data\":{\"layout\":\"[50,50]\"},\"elements\":[{\"node\":\"col_name\",\"element\":\"col\",\"data\":{},\"elements\":[{\"node\":\"name\",\"element\":\"input\",\"data\":{\"name\":\"name\",\"label\":\"Name\",\"type\":\"text\",\"required\":1,\"unique\":1}}]},{\"node\":\"col_mode\",\"element\":\"col\",\"data\":{},\"elements\":[{\"node\":\"mode\",\"element\":\"select\",\"data\":{\"name\":\"mode\",\"label\":\"Mode\",\"options\":\"test\\nlive\"}}]}]},{\"node\":\"row_pk\",\"element\":\"row\",\"data\":{\"layout\":\"[100]\"},\"elements\":[{\"node\":\"col_pk\",\"element\":\"col\",\"data\":{},\"elements\":[{\"node\":\"publishable_key\",\"element\":\"input\",\"data\":{\"name\":\"publishable_key\",\"label\":\"Publishable Key\",\"type\":\"text\",\"description\":\"Stripe publishable key (not a secret).\"}}]}]},{\"node\":\"row_secrets\",\"element\":\"row\",\"data\":{\"layout\":\"[50,50]\"},\"elements\":[{\"node\":\"col_sk\",\"element\":\"col\",\"data\":{},\"elements\":[{\"node\":\"secret_key\",\"element\":\"password\",\"data\":{\"name\":\"secret_key\",\"label\":\"Secret Key\",\"description\":\"Stripe API secret key.\"}}]},{\"node\":\"col_wh\",\"element\":\"col\",\"data\":{},\"elements\":[{\"node\":\"webhook_secret\",\"element\":\"password\",\"data\":{\"name\":\"webhook_secret\",\"label\":\"Webhook Signing Secret\",\"description\":\"Stripe webhook signing secret.\"}}]}]},{\"node\":\"name_and_status_container\",\"element\":\"row\",\"data\":{\"layout\":\"[50,50]\"},\"elements\":[{\"node\":\"1ik96ahpb\",\"element\":\"col\",\"data\":{}},{\"node\":\"2rih7p6g7\",\"element\":\"col\",\"data\":{}}]}]",
+  "search_fields": "",
+  "title_fields": "",
+  "resources": [],
+  "__ENTITY__": "Entity"
+}

@@ -1,0 +1,166 @@
+{
+  "App": {
+    "name": "control",
+    "version": "0.0.21"
+  },
+  "documents": {
+    "Entity:Module": {
+      "__app__": "loopar"
+    },
+    "Entity:App": {
+      "__app__": "loopar"
+    },
+    "App:control": {
+      "type": "Web App",
+      "name": "control",
+      "description": "Loopar Cloud — control plane: billing, subscriptions and tenant administration",
+      "version": "0.0.21",
+      "autor": "alfredrz2012@gmail.com",
+      "icon": "Cloud",
+      "footer_height": "",
+      "col_padding": "",
+      "col_margin": "",
+      "logo": "[]",
+      "logo_dark": "[]",
+      "logo_mini": "[]",
+      "logo_mini_dark": "[]",
+      "favicon": "[]",
+      "logo_height": "",
+      "has_footer": 0,
+      "has_copyright": 0,
+      "fixed": 0,
+      "logo_position": "",
+      "rounded": "",
+      "solid": 0,
+      "opacity": "",
+      "menu_items": [
+        {
+          "parent_document": "App",
+          "name": "Msq6LAj0YacEh9N",
+          "page": "Loopar Princing",
+          "link": "Pricing",
+          "parent_menu": null,
+          "document_parent_name": null
+        },
+        {
+          "parent_document": "App",
+          "name": "mJr5Uc4M7GS3P8O",
+          "page": "Cloud Success",
+          "link": "success",
+          "parent_menu": null,
+          "document_parent_name": null
+        },
+        {
+          "parent_document": "App",
+          "name": "dR7aWFJKS90D6OB",
+          "page": "Cloud Cancel",
+          "link": "cancel",
+          "parent_menu": null,
+          "document_parent_name": null
+        }
+      ],
+      "menu_actions": [],
+      "info": ""
+    },
+    "Entity:Module Group": {
+      "__app__": "loopar"
+    },
+    "Module Group:modules": {
+      "name": "modules",
+      "description": "Modules",
+      "in_sidebar": 1
+    },
+    "Module:stripe": {
+      "name": "stripe",
+      "description": "stripe",
+      "app_name": "control",
+      "module_group": "modules",
+      "in_sidebar": 1
+    },
+    "Entity:Stripe Account": {
+      "__root__": "/apps/control/modules/stripe/entities/stripe-account"
+    },
+    "Entity:Menu Item": {
+      "__app__": "loopar"
+    },
+    "Entity:Menu Action": {
+      "__app__": "loopar"
+    },
+    "Entity:Resources": {
+      "__app__": "loopar"
+    },
+    "Entity:Entity": {
+      "__app__": "loopar"
+    },
+    "Module:subscriptions": {
+      "name": "subscriptions",
+      "description": "subscriptions",
+      "app_name": "control",
+      "module_group": "modules",
+      "in_sidebar": 1
+    },
+    "Entity:Claim Token": {
+      "__root__": "/apps/control/modules/subscriptions/entities/claim-token"
+    },
+    "Entity:Customer": {
+      "__root__": "/apps/control/modules/subscriptions/entities/customer"
+    },
+    "Entity:Plan": {
+      "__root__": "/apps/control/modules/subscriptions/entities/plan"
+    },
+    "Entity:Provisioned Tenant": {
+      "__root__": "/apps/control/modules/subscriptions/entities/provisioned-tenant"
+    },
+    "Entity:Subscription": {
+      "__root__": "/apps/control/modules/subscriptions/entities/subscription"
+    },
+    "Entity:Webhook Event": {
+      "__root__": "/apps/control/modules/subscriptions/entities/webhook-event"
+    },
+    "Builder:Page Builder": {
+      "__app__": "loopar"
+    },
+    "Page Builder:Cloud Cancel": {
+      "__root__": "/apps/control/modules/subscriptions/pages/cloud-cancel"
+    },
+    "Page Builder:Cloud Success": {
+      "__root__": "/apps/control/modules/subscriptions/pages/cloud-success"
+    },
+    "Page Builder:Loopar Princing": {
+      "__root__": "/apps/control/modules/subscriptions/pages/loopar-princing"
+    },
+    "Builder:Controller Builder": {
+      "__app__": "loopar"
+    },
+    "Controller Builder:Stripe Webhook": {
+      "__root__": "/apps/control/modules/stripe/controllers/stripe-webhook"
+    },
+    "Controller Builder:Auth Claim": {
+      "__root__": "/apps/control/modules/subscriptions/controllers/auth-claim"
+    },
+    "Controller Builder:Cloud Mail": {
+      "__root__": "/apps/control/modules/subscriptions/controllers/cloud-mail"
+    },
+    "Controller Builder:Signup": {
+      "__root__": "/apps/control/modules/subscriptions/controllers/signup"
+    },
+    "Module:control": {
+      "name": "control",
+      "description": "control",
+      "app_name": "control",
+      "module_group": "modules",
+      "icon": "Cloud",
+      "in_sidebar": 1
+    }
+  },
+  "postInstaller": {
+    "App:control": "link",
+    "Entity:Stripe Account": "link",
+    "Entity:Claim Token": "link",
+    "Entity:Customer": "link",
+    "Entity:Plan": "link",
+    "Entity:Provisioned Tenant": "link",
+    "Entity:Subscription": "link",
+    "Entity:Webhook Event": "link"
+  }
+}

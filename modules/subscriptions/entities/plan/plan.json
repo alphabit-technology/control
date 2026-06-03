@@ -1,0 +1,15 @@
+{
+  "name": "Plan",
+  "module": "subscriptions",
+  "default_list_view": "List",
+  "is_single": 0,
+  "is_static": 0,
+  "include_in_installer": 0,
+  "is_child": 0,
+  "is_builder": 0,
+  "doc_structure": "[{\"node\":\"row_identity\",\"element\":\"row\",\"data\":{\"layout\":\"[50,50]\"},\"elements\":[{\"node\":\"col_name\",\"element\":\"col\",\"data\":{},\"elements\":[{\"node\":\"name\",\"element\":\"input\",\"data\":{\"name\":\"name\",\"label\":\"Name\",\"type\":\"VARCHAR\",\"required\":1,\"unique\":1,\"set_only_time\":1,\"in_list_view\":1,\"searchable\":1}}]},{\"node\":\"col_active\",\"element\":\"col\",\"data\":{},\"elements\":[{\"node\":\"active\",\"element\":\"switch\",\"data\":{\"name\":\"active\",\"label\":\"Active\",\"in_list_view\":1}}]}]},{\"node\":\"row_pricing\",\"element\":\"row\",\"data\":{\"layout\":\"[50,50]\"},\"elements\":[{\"node\":\"col_amount\",\"element\":\"col\",\"data\":{},\"elements\":[{\"node\":\"amount\",\"element\":\"input\",\"data\":{\"name\":\"amount\",\"label\":\"Amount (minor units)\",\"format\":\"int\",\"in_list_view\":1}},{\"node\":\"currency\",\"element\":\"input\",\"data\":{\"name\":\"currency\",\"label\":\"Currency\",\"type\":\"text\",\"in_list_view\":1}}]},{\"node\":\"col_interval\",\"element\":\"col\",\"data\":{},\"elements\":[{\"node\":\"interval\",\"element\":\"select\",\"data\":{\"name\":\"interval\",\"label\":\"Interval\",\"options\":\"month\\nyear\",\"in_list_view\":1}}]}]},{\"node\":\"row_stripe\",\"element\":\"row\",\"data\":{\"layout\":\"[50,50]\"},\"elements\":[{\"node\":\"col_product\",\"element\":\"col\",\"data\":{},\"elements\":[{\"node\":\"stripe_product_id\",\"element\":\"input\",\"data\":{\"name\":\"stripe_product_id\",\"label\":\"Stripe Product ID\",\"type\":\"text\"}}]},{\"node\":\"col_price\",\"element\":\"col\",\"data\":{},\"elements\":[{\"node\":\"stripe_price_id\",\"element\":\"input\",\"data\":{\"name\":\"stripe_price_id\",\"label\":\"Stripe Price ID\",\"type\":\"text\"}}]}]},{\"node\":\"row_limits\",\"element\":\"row\",\"data\":{\"layout\":\"[100]\"},\"elements\":[{\"node\":\"col_limits\",\"element\":\"col\",\"data\":{},\"elements\":[{\"node\":\"limits\",\"element\":\"textarea\",\"data\":{\"name\":\"limits\",\"label\":\"Limits\",\"format\":\"text\",\"description\":\"JSON - reserved for per-plan quotas (unused in v1)\"}}]}]},{\"node\":\"name_and_status_container\",\"element\":\"row\",\"data\":{\"layout\":\"[50,50]\"},\"elements\":[{\"node\":\"d0rcc3e34\",\"element\":\"col\",\"data\":{}},{\"node\":\"ig8p1udn8\",\"element\":\"col\",\"data\":{}}]}]",
+  "search_fields": "",
+  "title_fields": "",
+  "resources": [],
+  "__ENTITY__": "Entity"
+}
