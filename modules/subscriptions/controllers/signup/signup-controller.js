@@ -838,14 +838,11 @@ export default class SignupController extends BaseController {
    * failure. Used by the "Resend activation email" modal selector.
    */
   async actionListResendableSubscriptions() {
-    // Load everything and filter in memory — the IN operator in loopar.db.getAll
-    // wasn't surviving SQL serialization here (ended up as a literal column).
-    // For typical operator scale (dozens of subs) this is cheap and explicit.
     const rows = await loopar.db.getAll(
       'Subscription',
       ['name', 'tenant_name', 'plan_name', 'status', 'customer', 'stripe_subscription_id']
     );
-    const resendable = new Set(['incomplete', 'trialing', 'past_due', 'pending']);
+    const resendable = new Set(['incomplete', 'trialing', 'past_due', 'pending', 'active']);
     const items = [];
     for (const r of rows || []) {
       if (!r?.stripe_subscription_id) continue;
@@ -984,6 +981,16 @@ export default class SignupController extends BaseController {
           tenantName: subscription.tenant_name,
           planName,
           trialEnd:   stripeSub.trial_end,
+          portalUrl,
+          setup:      setupInfo,
+        });
+      } else if (stripeSub.status === 'active') {
+        // Customer is already paying — they lost their original link and need
+        // the Portal back for invoice / payment / cancel actions.
+        await sendPortalAccessEmail({
+          to:         customer.email,
+          tenantName: subscription.tenant_name,
+          planName,
           portalUrl,
           setup:      setupInfo,
         });
