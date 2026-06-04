@@ -1080,6 +1080,38 @@ async function sendTrialStartEmail({ to, tenantName, planName, trialEnd, portalU
 }
 
 /**
+ * Portal-access email — for already-active subscriptions. The customer is
+ * paying just fine; they just lost the original Portal link and need it back
+ * to update payment, download invoices or cancel.
+ */
+async function sendPortalAccessEmail({ to, tenantName, planName, portalUrl, setup }) {
+  const subject = `Your ${tenantName} billing portal`;
+  const html = `
+    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif; max-width: 560px; margin: 0 auto; color: #222;">
+      <h2 style="margin: 0 0 16px 0;">Manage your subscription</h2>
+      <p>Here's a fresh link to your billing portal for <strong>${tenantName}</strong> (${planName}).</p>
+      <p>From the portal you can update your payment method, download invoices, or cancel your subscription anytime.</p>
+      ${renderSetupFeeBlock(setup)}
+      <p style="margin: 28px 0;">
+        <a href="${portalUrl}"
+           style="display:inline-block;background:#1D9E75;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:600">
+          Open billing portal
+        </a>
+      </p>
+      <p style="color:#666;font-size:13px">
+        If the button doesn't work, copy this link into your browser:<br>
+        <span style="word-break: break-all">${portalUrl}</span>
+      </p>
+      <hr style="border:none;border-top:1px solid #eee;margin:28px 0">
+      <p style="color:#999;font-size:12px">
+        This link expires after about an hour for security. If you need a new one, just reply and we'll send another.
+      </p>
+    </div>
+  `;
+  return loopar.mail.send({ to, subject, html });
+}
+
+/**
  * Scheduled-subscription start email — sent when the operator opens a Sub
  * with a future billing anchor for an existing tenant. The first charge
  * hasn't happened yet; the customer needs to add payment before then.
