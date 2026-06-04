@@ -1,13 +1,106 @@
 'use strict';
 
-import { loopar, tenant } from 'loopar';
+import { loopar, tenant, Op } from 'loopar';
 import fs from 'fs';
 import path from 'pathe';
 import crypto from 'node:crypto';
 import { issueClaimToken } from './claim-issuer.js';
 
-const PORT_BASE = 3100;
-const PORT_MAX = 3999;
+/**
+ * Provisioning is fire-and-forget from the Stripe webhook, so a crash of the
+ * control-plane process between checkout.session.completed and a clean
+ * `tenant_provisioned=1` would leave the Subscription stuck. To make the
+ * pipeline self-healing we persist `provisioning_attempts` / `retry_after` /
+ * `last_error` on the Subscription and a cron + boot hook walk the candidates.
+ *
+ * Backoff sequence (ms after attempt N fails): 1m, 5m, 15m, 1h, 6h. After
+ * MAX_PROVISIONING_ATTEMPTS failures the Subscription is marked `failed` and
+ * stays out of the retry pool — the operator has to investigate and clear
+ * `provisioning_attempts` manually to try again.
+ */
+export const MAX_PROVISIONING_ATTEMPTS = 5;
+const PROVISIONING_BACKOFF_MS = [
+  60 * 1000,            // 1m
+  5  * 60 * 1000,       // 5m
+  15 * 60 * 1000,       // 15m
+  60 * 60 * 1000,       // 1h
+  6  * 60 * 60 * 1000,  // 6h
+];
+
+function nextRetryAfter(attemptsSoFar) {
+  // attemptsSoFar is the count AFTER incrementing for the failure we just had.
+  // We index BACKOFF[attemptsSoFar - 1] so attempt 1 -> 1m, attempt 5 -> 6h.
+  const idx = Math.max(0, Math.min(PROVISIONING_BACKOFF_MS.length - 1, attemptsSoFar - 1));
+  return new Date(Date.now() + PROVISIONING_BACKOFF_MS[idx]).toISOString();
+}
+
+/**
+ * Sweep Subscriptions whose `provisioning_retry_after` is overdue and
+ * re-run `provisionTenant` on each. Runs IN SERIES (PM2 / Caddy / install
+ * are too heavyweight to fan out concurrently). Exposed both as
+ * `/api/Signup/retryProvisioning` (cron) and as a boot-time call from the
+ * framework's builder.js so a crashed mid-flight provisioning recovers
+ * within a minute of the control plane coming back up.
+ *
+ * Idempotent: provisionTenant short-circuits on already-provisioned subs
+ * and refuses retries past the cap, so calling this more often than
+ * necessary is harmless.
+ *
+ * @returns {Promise<{attempted:number, succeeded:number, failed:number, skipped:number}>}
+ */
+export async function runProvisioningRetrySweep() {
+  const out = { attempted: 0, succeeded: 0, failed: 0, skipped: 0 };
+
+  let rows;
+  try {
+    rows = await loopar.db.getAll(
+      'Subscription',
+      ['name', 'tenant_name', 'status', 'tenant_provisioned',
+       'provisioning_attempts', 'provisioning_retry_after'],
+      {
+        tenant_provisioned: 0,
+        // Only retry subs Stripe still considers live. Canceled / past_due
+        // would be picked up by their own lifecycle handlers.
+        status: { [Op.in]: ['active', 'trialing'] },
+        // Overdue: retry_after is set AND <= now.
+        provisioning_retry_after: { [Op.lte]: new Date().toISOString() },
+      }
+    );
+  } catch (err) {
+    console.error('[provisioning/retry] could not list candidates:', err.message);
+    return out;
+  }
+
+  for (const row of rows || []) {
+    if (!row.name || !row.tenant_name) {
+      out.skipped++;
+      continue;
+    }
+    const attempts = Number(row.provisioning_attempts) || 0;
+    if (attempts >= MAX_PROVISIONING_ATTEMPTS) {
+      out.skipped++;
+      continue;
+    }
+    out.attempted++;
+    try {
+      const ok = await provisionTenant(row.name);
+      if (ok) out.succeeded++; else out.failed++;
+    } catch (err) {
+      // provisionTenant already persists its own error state — this catch
+      // is just so one bad row doesn't abort the whole sweep.
+      console.error(`[provisioning/retry] ${row.name} threw:`, err.message);
+      out.failed++;
+    }
+  }
+
+  if (out.attempted > 0) {
+    console.log(
+      `[provisioning/retry] swept ${out.attempted} ` +
+      `(${out.succeeded} ok, ${out.failed} fail, ${out.skipped} skipped)`
+    );
+  }
+  return out;
+}
 
 // Domain suffix for new cloud workspaces. Defaults to `.localhost` for dev;
 // production sets this in the control tenant's .env once wildcard DNS is wired.
@@ -68,104 +161,6 @@ async function sendClaimEmail({ to, claimUrl, tenantName, planName, expiresAt })
   return loopar.mail.send({ to, subject, html });
 }
 
-/**
- * Pre-seed `config/db.config.json` for the new tenant by copying the control
- * plane's template and picking a unique `database` name. With this in place
- * the new tenant skips the `/loopar/system/connect` wizard on first boot
- * and goes straight to install. SQLite for now; a future provider setting
- * could point new tenants at a shared Postgres/MySQL instead.
- */
-function writeNewTenantDbConfig(tenantName) {
-  const controlConfigPath = path.join(
-    process.cwd(),
-    'sites',
-    loopar.tenantId,
-    'config',
-    'db.config.json'
-  );
-  if (!fs.existsSync(controlConfigPath)) {
-    throw new Error(
-      `Control plane db.config.json not found at ${controlConfigPath} — ` +
-      `cannot template a new tenant's DB config.`
-    );
-  }
-
-  const tmpl = JSON.parse(fs.readFileSync(controlConfigPath, 'utf8'));
-  // Unique per-tenant DB name. SHA-1 of tenant+timestamp (16 hex chars) keeps
-  // it short, predictable, and collision-free in practice.
-  tmpl.database =
-    'db_' + crypto.createHash('sha1').update(tenantName + Date.now()).digest('hex').slice(0, 16);
-
-  const configDir = path.join(process.cwd(), 'sites', tenantName, 'config');
-  fs.mkdirSync(configDir, { recursive: true });
-  fs.writeFileSync(
-    path.join(configDir, 'db.config.json'),
-    JSON.stringify(tmpl, null, 2)
-  );
-
-  return tmpl.database;
-}
-
-/**
- * Wait until the new tenant's HTTP server is accepting connections. We probe
- * with HEAD `/` — anything that returns (even a 4xx) means the server is up.
- * Polls every `delayMs` up to `maxAttempts` times.
- */
-async function waitForTenantReady(domain, port, { maxAttempts = 30, delayMs = 1000 } = {}) {
-  const url = `http://${domain}:${port}/`;
-  for (let i = 0; i < maxAttempts; i++) {
-    try {
-      const r = await fetch(url, { method: 'HEAD' });
-      // Any response (even 404/302) means the server is alive and routing.
-      if (r.status < 500) return true;
-    } catch (_) {
-      // Connection refused / DNS / etc. — keep waiting.
-    }
-    await new Promise(r => setTimeout(r, delayMs));
-  }
-  return false;
-}
-
-/**
- * Trigger the standard Loopar installer in the new tenant via its HTTP API.
- * The tenant's installer #seedFromEnv() fills missing fields (email, company,
- * password) from process.env (CUSTOMER_EMAIL + TENANT_ID + an auto-generated
- * password). We still pass `email` and `company` explicitly to be robust
- * against env propagation hiccups; password is left empty so seedFromEnv
- * generates it (customer recovers via the magic-link / password-reset flow).
- */
-async function runRemoteLooparInstall({ domain, port, tenantName, customerEmail }) {
-  // Capital "S" matters: middleware.js gates `/api/System/*` from the
-  // "not-installed" redirect so the install request can actually reach the
-  // controller. With lowercase "/api/system/*" the middleware redirects to
-  // the install page and our POST never executes.
-  const url = `http://${domain}:${port}/api/System/install?app_name=loopar`;
-  const r = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      email:            customerEmail || '',
-      company:          tenantName,
-      admin_password:   '',
-      confirm_password: '',
-    }),
-    // The install endpoint ends with `return this.redirect("view")` — we don't
-    // want to follow that redirect (it points to /desk on the tenant, which
-    // requires auth we don't have from here).
-    redirect: 'manual',
-  });
-
-  // Any 2xx or 3xx is OK — the install succeeded and the controller is just
-  // trying to redirect us. 4xx/5xx means something failed.
-  if (r.status >= 400) {
-    const body = await r.text().catch(() => '<no body>');
-    throw new Error(
-      `Install returned ${r.status}: ${body.slice(0, 400)}`
-    );
-  }
-  return { status: r.status };
-}
-
 function emitProgress(subscriptionId, step, payload = {}) {
   // Public progress channel — uses the default `__global__` room so the
   // post-checkout success page (unauthenticated) can subscribe to it.
@@ -193,18 +188,6 @@ async function setSubscriptionStep(subscription, step) {
   }
 }
 
-function allocateFreePort() {
-  const usedPorts = new Set(
-    tenant.tenants().map(t => parseInt(t.env.PORT, 10)).filter(Boolean)
-  );
-  let port = PORT_BASE;
-  while (port <= PORT_MAX && usedPorts.has(port)) port++;
-  if (port > PORT_MAX) {
-    throw new Error('No free port available');
-  }
-  return port;
-}
-
 /**
  * Provision the tenant for a cloud Subscription. Idempotent: short-circuits
  * if the Subscription is already marked `tenant_provisioned`.
@@ -226,6 +209,18 @@ export async function provisionTenant(subscriptionName) {
   if (subscription.tenant_provisioned === 1 || subscription.tenant_provisioned === '1') {
     console.log(`[provisioning] ${subscriptionName} already provisioned — skipping`);
     return true;
+  }
+
+  // Honor the "given up" mark from previous retries. The operator clears
+  // `provisioning_attempts` (and `provisioning_step` if they want a clean
+  // log) to re-enable retries — we treat anything at or above the cap as
+  // permanently failed so a manual reset is explicit.
+  const priorAttempts = Number(subscription.provisioning_attempts) || 0;
+  if (priorAttempts >= MAX_PROVISIONING_ATTEMPTS) {
+    console.warn(
+      `[provisioning] ${subscriptionName} reached ${priorAttempts} attempts — refusing further retries until cleared`
+    );
+    return false;
   }
 
   const tenantName = String(subscription.tenant_name || '').trim();
@@ -265,7 +260,7 @@ export async function provisionTenant(subscriptionName) {
       throw new Error(`Tenant directory "${tenantName}" already exists`);
     }
 
-    const port = allocateFreePort();
+    const port = tenant.allocateFreePort();
     subscription.port = port;
     await subscription.save({ validate: false });
 
@@ -316,33 +311,12 @@ export async function provisionTenant(subscriptionName) {
       }
     }
 
-    // ---- 3) write tenant .env (CUSTOMER_EMAIL + claim verifier vars) ----
-    emitProgress(subscriptionName, 'writing-env', { port, domain });
-    await setSubscriptionStep(subscription, 'writing-env');
-
-    await tenant.saveTenant({
-      name:                 tenantName,
-      ID:                   tenantName,
-      PORT:                 port,
-      DOMAIN:               domain,
-      NODE_ENV:             process.env.NODE_ENV || 'development',
-      CUSTOMER_EMAIL:       customerEmail,
-      CLOUD_VERIFIER_URL:   claim ? getVerifierUrl()    : '',
-      CLOUD_VERIFIER_TOKEN: claim ? claim.verifier_token : '',
-    });
-
-    // ---- 3b) seed db.config.json so the new tenant skips /system/connect -
-    // Done before PM2 start so the tenant boots already knowing its DB.
-    writeNewTenantDbConfig(tenantName);
-
-    // ---- 4) Caddy + 5) PM2 — delegate to Tenant Manager -------------------
-    // Same caddy.ensureReady() / registerTenant() + PM2 wiring the desk uses
-    // when an operator creates a tenant by hand. Custom env keys we just
-    // wrote (CUSTOMER_EMAIL, CLOUD_VERIFIER_*) survive Tenant Manager.save()
-    // thanks to the merge-and-preserve behaviour in buildTenantEnvData.
-    emitProgress(subscriptionName, 'starting', { port, domain });
-    await setSubscriptionStep(subscription, 'starting');
-
+    // ---- 3..6) tenant bring-up — delegate to TenantManager.provision -----
+    // Single call writes the .env (with our custom CUSTOMER_EMAIL / CLOUD_*
+    // keys merged in), seeds db.config.json from the control plane, brings
+    // Caddy + PM2 online, waits for HTTP, and runs `/api/System/install`.
+    // Progress events are forwarded through emitProgress / setSubscriptionStep
+    // so the success page sees each step over realtime.
     const tenantDoc = await loopar.newDocument('Tenant Manager', {
       id:       tenantName,
       port,
@@ -350,34 +324,54 @@ export async function provisionTenant(subscriptionName) {
       node_env: process.env.NODE_ENV || 'development',
     });
     tenantDoc.name = tenantName;
-    tenantDoc.__IS_NEW__ = false; // .env already written; don't re-check uniqueness
 
-    const ok = await tenantDoc.start();
-    if (!ok) {
-      throw new Error('Tenant Manager.start returned false');
-    }
+    // INSTALL_TOKEN: random per-tenant secret that the new tenant's installer
+    // endpoint validates against `X-Install-Token`. With it the install POST
+    // is no longer "anyone-who-reaches-the-port-first wins" — only this
+    // provisioning run (which holds the secret) can install loopar. After
+    // success we wipe the token from the .env (defense in depth; the
+    // installer also refuses re-installs once loopar.__installed__ flips).
+    const installToken = crypto.randomBytes(32).toString('hex');
 
-    // ---- 6) wait for tenant HTTP + auto-install Loopar -------------------
-    // This is what turns the freshly-started (but empty) tenant into a real
-    // Loopar workspace: creates the SQLite DB, runs alterSchema, installs
-    // the `loopar` base app, and creates the Administrator user. Without
-    // this, the customer would land on /loopar/system/connect — a technical
-    // wizard not meant for end users.
-    emitProgress(subscriptionName, 'installing-loopar', { port, domain });
-    await setSubscriptionStep(subscription, 'installing-loopar');
+    await tenantDoc.provision({
+      env: {
+        CUSTOMER_EMAIL:       customerEmail,
+        CLOUD_VERIFIER_URL:   claim ? getVerifierUrl()     : '',
+        CLOUD_VERIFIER_TOKEN: claim ? claim.verifier_token : '',
+        INSTALL_TOKEN:        installToken,
+      },
+      // Source for the new tenant's db.config.json — we clone the control
+      // plane's template (SQLite today; could become a shared Postgres later
+      // by changing only the control plane's config).
+      dbConfigFrom: loopar.tenantId,
+      install:      true,
+      installPayload: {
+        email:            customerEmail || '',
+        company:          tenantName,
+        admin_password:   '',
+        confirm_password: '',
+      },
+      installHeaders: {
+        'X-Install-Token': installToken,
+      },
+      onProgress: (step, payload) => {
+        emitProgress(subscriptionName, step, payload);
+        // Persist the step on the Subscription too, so a slow client that
+        // missed the realtime burst can still read progress via /signup/status.
+        // Fire-and-forget — a save failure must not stop provisioning.
+        setSubscriptionStep(subscription, step).catch(() => {});
+      },
+    });
 
-    const isUp = await waitForTenantReady(domain, port);
-    if (!isUp) {
-      throw new Error(`Tenant did not become reachable on ${domain}:${port}`);
-    }
-
+    // Install succeeded — scrub INSTALL_TOKEN from the .env so a future
+    // restart can't reopen the install window. The live tenant process
+    // still has it in process.env until its next restart, but the system
+    // controller refuses to re-install once `loopar.__installed__` is true,
+    // so the token is already inert from a security standpoint.
     try {
-      await runRemoteLooparInstall({ domain, port, tenantName, customerEmail });
+      await tenant.saveTenant({ name: tenantName, INSTALL_TOKEN: '' });
     } catch (err) {
-      // Install failure is fatal for the SaaS flow — the customer would land
-      // on the connect wizard. Surface it loudly so the operator can retry
-      // (manual reinstall) or investigate.
-      throw new Error(`Auto-install failed: ${err.message}`);
+      console.warn(`[provisioning] could not scrub INSTALL_TOKEN: ${err.message}`);
     }
 
     // ---- 7) send magic-link email ----------------------------------------
@@ -403,13 +397,16 @@ export async function provisionTenant(subscriptionName) {
     }
 
     // ---- 8) mark complete -------------------------------------------------
-    subscription.tenant_provisioned = 1;
-    subscription.provisioning_step  = 'ready';
+    // On success: clear the retry trail so the cron stops considering this
+    // Subscription, but keep `provisioning_attempts` as audit (so we can see
+    // it took N tries). Errors are wiped to avoid stale text in the desk UI.
+    subscription.tenant_provisioned      = 1;
+    subscription.provisioning_step       = 'ready';
+    subscription.provisioning_retry_after = null;
+    subscription.provisioning_last_error  = null;
     await subscription.save({ validate: false });
 
-    const url = domain.endsWith('.localhost')
-      ? `http://${domain}:${port}`
-      : `https://${domain}`;
+    const url = tenant.tenantUrl(tenantName, { domain, port });
 
     emitProgress(subscriptionName, 'ready', {
       port,
@@ -421,10 +418,27 @@ export async function provisionTenant(subscriptionName) {
     console.log(`[provisioning] ${tenantName} ready on ${domain} (port ${port})`);
     return true;
   } catch (err) {
-    console.error(`[provisioning] failed for ${tenantName}:`, err.message);
-    emitProgress(subscriptionName, 'error', { message: err.message });
+    const attempts = priorAttempts + 1;
+    const givenUp  = attempts >= MAX_PROVISIONING_ATTEMPTS;
+    const retryAt  = givenUp ? null : nextRetryAfter(attempts);
+    console.error(
+      `[provisioning] failed for ${tenantName} (attempt ${attempts}/${MAX_PROVISIONING_ATTEMPTS}):`,
+      err.message,
+      givenUp ? '— giving up' : `— next retry at ${retryAt}`
+    );
+    emitProgress(subscriptionName, 'error', {
+      message: err.message,
+      attempts,
+      retry_after: retryAt,
+      given_up:    givenUp,
+    });
     try {
-      subscription.provisioning_step = `error: ${err.message}`.slice(0, 240);
+      subscription.provisioning_step        = givenUp
+        ? 'failed'
+        : `error: ${err.message}`.slice(0, 240);
+      subscription.provisioning_attempts    = attempts;
+      subscription.provisioning_retry_after = retryAt;
+      subscription.provisioning_last_error  = String(err.message || '').slice(0, 240);
       await subscription.save({ validate: false });
     } catch (_) { /* swallow — original error is already logged */ }
     return false;

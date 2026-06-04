@@ -1,5 +1,5 @@
 {
-  "name": "Loopar Princing",
+  "name": "Loopar Pricing",
   "module": "subscriptions",
   "doc_structure": "[{\"node\":\"tabs1_el785880544560\",\"element\":\"tabs\",\"data\":{\"label\":\"Tabs1\"},\"elements\":[{\"node\":\"tab_el228009797268\",\"element\":\"tab\",\"data\":{\"label\":\"Cloud\",\"animation_duration\":1000},\"elements\":[{\"node\":\"stripe_plans2_el1130180560879\",\"element\":\"stripe_plans\",\"data\":{\"label\":\"Stripe_plans2\",\"category\":\"cloud\",\"group_by\":\"product\",\"animation_duration\":1000}}]},{\"node\":\"tab_el653285990887\",\"element\":\"tab\",\"data\":{\"label\":\"Service\",\"animation_duration\":1000},\"elements\":[{\"node\":\"stripe_plans3_el532145662785\",\"element\":\"stripe_plans\",\"data\":{\"label\":\"Stripe_plans3\",\"category\":\"service\",\"group_by\":\"product\",\"animation_duration\":1000}}]},{\"node\":\"tab_el164848203946\",\"element\":\"tab\",\"data\":{\"label\":\"Donation\",\"animation_duration\":1000},\"elements\":[{\"node\":\"stripe_plans4_el48406069746\",\"element\":\"stripe_plans\",\"data\":{\"label\":\"Stripe_plans4\",\"category\":\"donation\",\"group_by\":\"product\",\"animation_duration\":1000}}]}]}]",
   "__ENTITY__": "Page Builder"

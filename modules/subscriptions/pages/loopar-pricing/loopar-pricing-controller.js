@@ -3,7 +3,7 @@
 
 import {PageController} from 'loopar';
 
-export default class LooparPrincingController extends PageController {
+export default class LooparPricingController extends PageController {
     constructor(props){
         super(props);
     }

@@ -5,7 +5,8 @@ import Stripe from 'stripe';
 import fs from 'fs';
 import path from 'pathe';
 import { cleanupCanceledTenants } from '../../lifecycle.js';
-import {RESERVED_NAMES, SUBDOMAIN_RE, EMAIL_RE, PORT_BASE, PORT_MAX, PLANS_CACHE_TTL_MS,shapePrice, sortByOrder} from "./helper.js"
+import { runProvisioningRetrySweep } from '../../provisioning.js';
+import {RESERVED_NAMES, SUBDOMAIN_RE, EMAIL_RE, PLANS_CACHE_TTL_MS, shapePrice, sortByOrder} from "./helper.js"
 
 let plansCache = { data: null, fetchedAt: 0 };
 
@@ -35,17 +36,12 @@ export default class SignupController extends BaseController {
     const provisioned = subscription.tenant_provisioned === 1
       || subscription.tenant_provisioned === '1';
 
-    // Build the eventual workspace URL if we have enough info. For
-    // .localhost dev domains include the port; for real domains Caddy fronts
-    // 443/80 so port stays implicit.
+    // Build the eventual workspace URL if we have enough info. URL composition
+    // (port for .localhost, no port for real domains behind Caddy) lives in
+    // tenant.tenantUrl so every caller stays in sync.
     let url = null;
     if (tenantName && provisioned) {
-      const env = tenant.readEnvFile(tenantName);
-      const domain = env?.DOMAIN || `${tenantName}.localhost`;
-      const port   = env?.PORT;
-      url = domain.endsWith('.localhost') && port
-        ? `http://${domain}:${port}`
-        : `https://${domain}`;
+      url = tenant.tenantUrl(tenantName);
     }
 
     return {
@@ -188,13 +184,11 @@ export default class SignupController extends BaseController {
       }
       // Two concurrent signups could pick the same port. Acceptable
       // while signups are infrequent; under load, replace with a DB lock or
-      // a sequence.
-      const usedPorts = new Set(
-        tenant.tenants().map(t => parseInt(t.env.PORT, 10)).filter(Boolean)
-      );
-      port = PORT_BASE;
-      while (port <= PORT_MAX && usedPorts.has(port)) port++;
-      if (port > PORT_MAX) {
+      // a sequence. allocateFreePort scans the live tenant set under sites/.
+      try {
+        port = tenant.allocateFreePort();
+      } catch (err) {
+        console.error('[signup] allocateFreePort failed:', err.message);
         return { status: 500, success: false, message: 'No free port available' };
       }
     }
@@ -320,6 +314,38 @@ export default class SignupController extends BaseController {
       return { status: 200, success: true, removed };
     } catch (err) {
       console.error('[signup/cleanupCanceled] failed:', err.message);
+      return { status: 500, success: false, message: err.message };
+    }
+  }
+
+  /**
+   * POST /api/Signup/retryProvisioning  (authenticated — operator only)
+   *
+   * Sweep Subscriptions whose provisioning is overdue for a retry and
+   * re-invoke `provisionTenant` on each one IN SERIES (PM2 / Caddy / install
+   * are too heavyweight to fan out). Designed to be triggered from a 1-min
+   * OS cron, and also called once from the control-plane boot hook to
+   * recover anything that was mid-flight during a crash.
+   *
+   * Candidates: status in (active, trialing) AND tenant not yet provisioned
+   * AND retry_after <= now AND attempts < MAX. The `provisioning_retry_after`
+   * filter doubles as the "already in flight" guard — the success path
+   * clears it, so a Subscription only matches when the prior attempt has
+   * truly given up (and is therefore safe to re-run, since provisionTenant
+   * is idempotent at its entry guard).
+   *
+   * Example cron (every minute):
+   *   * * * * *  curl -s -X POST \
+   *     -H "Cookie: $LOOPAR_COOKIE" \
+   *     -H "X-CSRF-Token: $LOOPAR_CSRF" \
+   *     http://localhost:3003/api/Signup/retryProvisioning
+   */
+  async actionRetryProvisioning() {
+    try {
+      const out = await runProvisioningRetrySweep();
+      return { status: 200, success: true, ...out };
+    } catch (err) {
+      console.error('[signup/retryProvisioning] failed:', err.message);
       return { status: 500, success: false, message: err.message };
     }
   }
@@ -700,10 +726,8 @@ export default class SignupController extends BaseController {
     if (stripeSub && customer.stripe_customer_id) {
       try {
         // Return URL after the customer finishes in the portal: their own
-        // workspace. Read its domain + port from its .env.
-        const tenantEnv = tenant.readEnvFile(tenantName);
-        const returnUrl = `http://${tenantEnv.DOMAIN || `${tenantName}.localhost`}` +
-          (tenantEnv.PORT ? `:${tenantEnv.PORT}` : '');
+        // workspace. tenantUrl handles .localhost vs real-domain composition.
+        const returnUrl = tenant.tenantUrl(tenantName);
         const portalSession = await stripeClient.billingPortal.sessions.create({
           customer:   customer.stripe_customer_id,
           return_url: returnUrl,
@@ -716,20 +740,34 @@ export default class SignupController extends BaseController {
       }
     }
 
-    // Trial mode: email the customer the portal link so they can add a card
-    // before the trial ends.
-    if (mode === 'trial' && portalUrl) {
+    // Trial / scheduled: email the customer the portal link so they can add a
+    // card before the first real charge. Checkout doesn't get an automatic
+    // email — the operator forwards the Checkout URL directly.
+    if (portalUrl && (mode === 'trial' || mode === 'scheduled')) {
       try {
-        await sendTrialStartEmail({
-          to:         email,
-          tenantName,
-          planName,
-          trialEnd:   stripeSub.trial_end,
-          portalUrl,
-        });
+        if (mode === 'trial') {
+          await sendTrialStartEmail({
+            to:         email,
+            tenantName,
+            planName,
+            trialEnd:   stripeSub.trial_end,
+            portalUrl,
+          });
+        } else {
+          // `current_period_end` on a scheduled Sub equals the billing anchor —
+          // i.e. when Stripe will attempt the first charge.
+          const firstChargeAt = stripeSub.current_period_end || null;
+          await sendScheduledStartEmail({
+            to:         email,
+            tenantName,
+            planName,
+            firstChargeAt,
+            portalUrl,
+          });
+        }
       } catch (err) {
         // Email failure is non-fatal — Sub exists, operator can resend.
-        console.warn('[signup/createForExisting] trial-start email failed:', err.message);
+        console.warn('[signup/createForExisting] activation email failed:', err.message);
       }
     }
 
@@ -780,6 +818,40 @@ async function sendTrialStartEmail({ to, tenantName, planName, trialEnd, portalU
       <hr style="border:none;border-top:1px solid #eee;margin:28px 0">
       <p style="color:#999;font-size:12px">
         We'll remind you again 3 days before the trial ends. If you have questions, just reply to this email.
+      </p>
+    </div>
+  `;
+  return loopar.mail.send({ to, subject, html });
+}
+
+/**
+ * Scheduled-subscription start email — sent when the operator opens a Sub
+ * with a future billing anchor for an existing tenant. The first charge
+ * hasn't happened yet; the customer needs to add payment before then.
+ */
+async function sendScheduledStartEmail({ to, tenantName, planName, firstChargeAt, portalUrl }) {
+  const firstCharge = firstChargeAt
+    ? new Date(firstChargeAt * 1000).toUTCString()
+    : 'a scheduled future date';
+  const subject = `Your ${tenantName} subscription is scheduled — add payment to activate`;
+  const html = `
+    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif; max-width: 560px; margin: 0 auto; color: #222;">
+      <h2 style="margin: 0 0 16px 0;">Your subscription is scheduled</h2>
+      <p>Your subscription to <strong>${planName}</strong> for <strong>${tenantName}</strong> is scheduled to start on <strong>${firstCharge}</strong>.</p>
+      <p>Add a payment method now so Stripe can charge you on that date — without one, the subscription won't activate.</p>
+      <p style="margin: 28px 0;">
+        <a href="${portalUrl}"
+           style="display:inline-block;background:#1D9E75;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:600">
+          Add payment method
+        </a>
+      </p>
+      <p style="color:#666;font-size:13px">
+        If the button doesn't work, copy this link into your browser:<br>
+        <span style="word-break: break-all">${portalUrl}</span>
+      </p>
+      <hr style="border:none;border-top:1px solid #eee;margin:28px 0">
+      <p style="color:#999;font-size:12px">
+        From the same link you can update your card, view invoices and cancel anytime. If you have questions, just reply to this email.
       </p>
     </div>
   `;

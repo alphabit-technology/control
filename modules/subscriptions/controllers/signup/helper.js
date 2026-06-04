@@ -7,9 +7,6 @@ const RESERVED_NAMES = new Set([
 const SUBDOMAIN_RE = /^[a-z][a-z0-9-]{1,28}[a-z0-9]$/;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-const PORT_BASE = 3100;
-const PORT_MAX = 3999;
-
 const PLANS_CACHE_TTL_MS = 5 * 60 * 1000;
 
 function shapePrice(p) {
@@ -49,8 +46,6 @@ export {
   RESERVED_NAMES,
   SUBDOMAIN_RE,
   EMAIL_RE,
-  PORT_BASE,
-  PORT_MAX,
   PLANS_CACHE_TTL_MS,
   shapePrice,
   sortByOrder

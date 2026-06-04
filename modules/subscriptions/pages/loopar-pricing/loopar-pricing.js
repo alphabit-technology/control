@@ -3,7 +3,7 @@
 
 import {BaseDocument} from 'loopar';
 
-export default class LooparPrincing extends BaseDocument {
+export default class LooparPricing extends BaseDocument {
     constructor(props){
         super(props);
     }

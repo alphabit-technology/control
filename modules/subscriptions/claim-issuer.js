@@ -1,6 +1,6 @@
 'use strict';
 
-import { loopar } from 'loopar';
+import { loopar, tenant } from 'loopar';
 import jwt from 'jsonwebtoken';
 import crypto from 'node:crypto';
 
@@ -103,13 +103,17 @@ export async function issueClaimToken(subscription, customer) {
 
   // Compose the public-facing URL the customer will click. Domain suffix is
   // controlled by CLOUD_DOMAIN_SUFFIX so dev (`.localhost`) and prod
-  // (`.loopar.build`) share the same code path.
+  // (`.loopar.build`) share the same code path. We use the override form of
+  // tenantUrl because at this point the tenant's .env may not exist yet (the
+  // provisioning flow signs the URL before writing tenant files), so we feed
+  // the domain + port directly.
   const domainSuffix = String(process.env.CLOUD_DOMAIN_SUFFIX || '.localhost').replace(/^\.?/, '.');
-  const port = subscription.port;
   const host = `${subscription.tenant_name}${domainSuffix}`;
-  const portSegment = (domainSuffix === '.localhost' && port) ? `:${port}` : '';
-  const proto = domainSuffix === '.localhost' ? 'http' : 'https';
-  const claimUrl = `${proto}://${host}${portSegment}/auth/claim?token=${encodeURIComponent(token)}`;
+  const baseUrl = tenant.tenantUrl(subscription.tenant_name, {
+    domain: host,
+    port:   subscription.port,
+  });
+  const claimUrl = `${baseUrl}/auth/claim?token=${encodeURIComponent(token)}`;
 
   return {
     token,

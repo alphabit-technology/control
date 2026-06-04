@@ -1,7 +1,7 @@
 {
   "App": {
     "name": "control",
-    "version": "0.0.21"
+    "version": "0.0.27"
   },
   "documents": {
     "Entity:Module": {
@@ -14,49 +14,53 @@
       "type": "Web App",
       "name": "control",
       "description": "Loopar Cloud — control plane: billing, subscriptions and tenant administration",
-      "version": "0.0.21",
+      "version": "0.0.27",
       "autor": "alfredrz2012@gmail.com",
       "icon": "Cloud",
       "footer_height": "",
       "col_padding": "",
       "col_margin": "",
-      "logo": "[]",
-      "logo_dark": "[]",
-      "logo_mini": "[]",
-      "logo_mini_dark": "[]",
-      "favicon": "[]",
+      "logo": "[{\"name\":\"logo-light.svg\",\"size\":16526,\"type\":\"image\",\"src\":\"/assets/public/logo-light.svg\"}]",
+      "logo_dark": "[{\"name\":\"logo-dark.svg\",\"size\":16646,\"type\":\"image\",\"src\":\"/assets/public/logo-dark.svg\"}]",
+      "logo_mini": "[{\"name\":\"logo-mini-light.svg\",\"size\":810,\"type\":\"image\",\"src\":\"/assets/public/logo-mini-light.svg\"}]",
+      "logo_mini_dark": "[{\"name\":\"logo-mini-dark.svg\",\"size\":810,\"type\":\"image\",\"src\":\"/assets/public/logo-mini-dark.svg\"}]",
+      "favicon": "[{\"name\":\"logo-mini-dark.svg\",\"size\":810,\"type\":\"image\",\"src\":\"/assets/public/logo-mini-dark.svg\"}]",
       "logo_height": "",
       "has_footer": 0,
       "has_copyright": 0,
       "fixed": 0,
       "logo_position": "",
       "rounded": "",
-      "solid": 0,
+      "show_user_section": 1,
+      "solid": 1,
       "opacity": "",
       "menu_items": [
         {
           "parent_document": "App",
-          "name": "Msq6LAj0YacEh9N",
-          "page": "Loopar Princing",
+          "name": "uZlQEjG08BA17Rv",
+          "page": "Loopar Pricing",
           "link": "Pricing",
           "parent_menu": null,
-          "document_parent_name": null
+          "document_parent_name": null,
+          "router_only": 0
         },
         {
           "parent_document": "App",
-          "name": "mJr5Uc4M7GS3P8O",
+          "name": "hf1h77Xj9O8FApy",
           "page": "Cloud Success",
           "link": "success",
           "parent_menu": null,
-          "document_parent_name": null
+          "document_parent_name": null,
+          "router_only": 1
         },
         {
           "parent_document": "App",
-          "name": "dR7aWFJKS90D6OB",
+          "name": "J20r17wp1jTenlh",
           "page": "Cloud Cancel",
           "link": "cancel",
           "parent_menu": null,
-          "document_parent_name": null
+          "document_parent_name": null,
+          "router_only": 1
         }
       ],
       "menu_actions": [],
@@ -126,8 +130,8 @@
     "Page Builder:Cloud Success": {
       "__root__": "/apps/control/modules/subscriptions/pages/cloud-success"
     },
-    "Page Builder:Loopar Princing": {
-      "__root__": "/apps/control/modules/subscriptions/pages/loopar-princing"
+    "Page Builder:Loopar Pricing": {
+      "__root__": "/apps/control/modules/subscriptions/pages/loopar-pricing"
     },
     "Builder:Controller Builder": {
       "__app__": "loopar"

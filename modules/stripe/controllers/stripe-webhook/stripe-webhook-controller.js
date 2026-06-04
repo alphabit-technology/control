@@ -250,9 +250,10 @@ export default class StripeWebhookController extends BaseController {
     }
 
     try {
-      const env = tenant.readEnvFile(tenantName) || {};
-      const returnUrl = `http://${env.DOMAIN || tenantName + '.localhost'}` +
-        (env.PORT ? `:${env.PORT}` : '');
+      // Tenant exists by the time we hit trial_will_end, so the no-override
+      // form is enough — tenantUrl reads its own DOMAIN/PORT and picks
+      // http://...:port for .localhost vs https://... for real domains.
+      const returnUrl = tenant.tenantUrl(tenantName);
       const portalSession = await stripeClient.billingPortal.sessions.create({
         customer:   customerId,
         return_url: returnUrl,
@@ -369,6 +370,12 @@ export default class StripeWebhookController extends BaseController {
 
     if (session.subscription) subscription.stripe_subscription_id = session.subscription;
     subscription.status = trialing ? 'trialing' : 'active';
+
+    // Safety net for the fire-and-forget provisioning below: if the control
+    // plane crashes between this ACK and provisionTenant clearing the field,
+    // the retry sweep (cron + boot hook) picks it up after 2 minutes. The
+    // happy path clears `provisioning_retry_after` inside provisionTenant.
+    subscription.provisioning_retry_after = new Date(Date.now() + 2 * 60 * 1000).toISOString();
     await subscription.save();
 
     // Link Stripe customer id back to the local Customer row.

@@ -1,8 +1,6 @@
 'use strict';
 
 import { loopar } from 'loopar';
-import { promisify } from 'util';
-import pm2 from 'pm2';
 import fs from 'fs';
 import path from 'pathe';
 
@@ -15,10 +13,6 @@ import path from 'pathe';
  * handlers using `Tenant Manager` methods — no helpers here. This file
  * exists only for the cron-style cleanup endpoint.
  */
-
-const pm2Connect = promisify(pm2.connect.bind(pm2));
-const pm2Disconnect = promisify(pm2.disconnect.bind(pm2));
-const pm2Delete = promisify(pm2.delete.bind(pm2));
 
 /**
  * Hard-delete tenant directories whose Subscription was canceled more than
@@ -49,24 +43,33 @@ export async function cleanupCanceledTenants() {
   let removed = 0;
   for (const row of rows || []) {
     if (!row.tenant_name) continue;
+
+    // Preferred path: hydrate the Tenant Manager doc and let it tear itself
+    // down (pm2 stop+delete, caddy unregister, rm sites/<name>/). The doc is
+    // null when the tenant entity is gone but the on-disk directory might
+    // still exist — fall back to a direct rmSync for that case.
+    const doc = await loopar.getDocument(
+      'Tenant Manager', row.tenant_name, null, { ifNotFound: null }
+    );
     const sitePath = path.join(process.cwd(), 'sites', row.tenant_name);
-
-    // Final pm2 delete in case a stopped process is still registered.
-    try {
-      await pm2Connect();
-      try { await pm2Delete(row.tenant_name); } catch (_) { /* gone already */ }
-      await pm2Disconnect().catch(() => {});
-    } catch (_) { /* connect failed — nothing to clean from pm2 */ }
-
-    if (fs.existsSync(sitePath)) {
+    let didRemove = false;
+    if (doc?.name) {
+      try {
+        await doc.destroy();
+        didRemove = !fs.existsSync(sitePath);
+      } catch (err) {
+        console.error(`[lifecycle/cleanup] destroy ${row.tenant_name}:`, err.message);
+      }
+    } else if (fs.existsSync(sitePath)) {
       try {
         fs.rmSync(sitePath, { recursive: true, force: true });
+        didRemove = true;
         console.log(`[lifecycle/cleanup] removed sites/${row.tenant_name}`);
-        removed++;
       } catch (err) {
         console.error(`[lifecycle/cleanup] rm ${sitePath}:`, err.message);
       }
     }
+    if (didRemove) removed++;
 
     // Stamp the Subscription so we don't keep re-trying once the dir is gone.
     try {
