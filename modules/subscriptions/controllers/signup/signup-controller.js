@@ -828,6 +828,187 @@ export default class SignupController extends BaseController {
           : 'Subscription scheduled. Send the portal URL to the customer to add a payment method.',
     };
   }
+
+  /**
+   * GET /api/Signup/listResendableSubscriptions   (authenticated — operator only)
+   *
+   * Returns Subscriptions whose customer would benefit from a fresh
+   * "activation" email — anything where the Sub exists in Stripe but the
+   * customer still needs to add a payment method or recover from a payment
+   * failure. Used by the "Resend activation email" modal selector.
+   */
+  async actionListResendableSubscriptions() {
+    // Load everything and filter in memory — the IN operator in loopar.db.getAll
+    // wasn't surviving SQL serialization here (ended up as a literal column).
+    // For typical operator scale (dozens of subs) this is cheap and explicit.
+    const rows = await loopar.db.getAll(
+      'Subscription',
+      ['name', 'tenant_name', 'plan_name', 'status', 'customer', 'stripe_subscription_id']
+    );
+    const resendable = new Set(['incomplete', 'trialing', 'past_due', 'pending']);
+    const items = [];
+    for (const r of rows || []) {
+      if (!r?.stripe_subscription_id) continue;
+      if (!resendable.has(r.status)) continue;
+      const customer = r.customer
+        ? await loopar.getDocument('Customer', r.customer)
+        : null;
+      items.push({
+        name:        r.name,
+        tenant_name: r.tenant_name,
+        plan_name:   r.plan_name,
+        status:      r.status,
+        email:       customer?.email || null,
+      });
+    }
+    items.sort((a, b) => (a.tenant_name || '').localeCompare(b.tenant_name || ''));
+    return { status: 200, success: true, subscriptions: items };
+  }
+
+  /**
+   * POST /api/Signup/resendActivationEmail   (authenticated — operator only)
+   *
+   * For a Subscription that's already in Stripe, generates a fresh Customer
+   * Portal session and re-sends the activation email. Picks the right copy
+   * (trial vs scheduled) by inspecting the live Stripe Subscription, so the
+   * customer gets a coherent message even if the local row drifted.
+   *
+   * body: { subscription_name }   — Loopar Subscription `name`
+   */
+  async actionResendActivationEmail() {
+    const subName = String(this.data?.subscription_name || '').trim();
+    if (!subName) {
+      return { status: 400, success: false, message: 'subscription_name is required' };
+    }
+
+    const subscription = await loopar.getDocument('Subscription', subName);
+    if (!subscription?.name) {
+      return { status: 404, success: false, message: `Subscription "${subName}" not found` };
+    }
+    if (!subscription.stripe_subscription_id) {
+      return {
+        status: 409,
+        success: false,
+        message: 'This Subscription has no Stripe id yet — there is nothing to resend.',
+      };
+    }
+
+    const customer = subscription.customer
+      ? await loopar.getDocument('Customer', subscription.customer)
+      : null;
+    if (!customer?.email || !customer.stripe_customer_id) {
+      return {
+        status: 409,
+        success: false,
+        message: 'Customer is missing email or Stripe customer id.',
+      };
+    }
+
+    const account = await loopar.getDocument('Stripe Account');
+    const secretKey = account?.secret_key;
+    if (!secretKey) {
+      return { status: 500, success: false, message: 'Stripe is not configured' };
+    }
+    const stripeClient = Stripe(secretKey);
+
+    // Fresh portal session — old ones expire after ~1h.
+    let portalUrl;
+    try {
+      const returnUrl = tenant.tenantUrl(subscription.tenant_name);
+      const portalSession = await stripeClient.billingPortal.sessions.create({
+        customer:   customer.stripe_customer_id,
+        return_url: returnUrl,
+      });
+      portalUrl = portalSession.url;
+    } catch (err) {
+      console.error('[signup/resendActivation] portal session failed:', err.message);
+      return { status: 502, success: false, message: `Could not create portal session: ${err.message}` };
+    }
+
+    // Read the Stripe Sub so we know whether to send the trial or scheduled
+    // copy, and so we can include the setup fee block when applicable.
+    let stripeSub;
+    try {
+      stripeSub = await stripeClient.subscriptions.retrieve(
+        subscription.stripe_subscription_id,
+        { expand: ['items.data.price.product'] }
+      );
+    } catch (err) {
+      console.error('[signup/resendActivation] subscriptions.retrieve failed:', err.message);
+      return { status: 502, success: false, message: `Could not load Stripe Subscription: ${err.message}` };
+    }
+
+    // Look for a parallel setup-installments schedule on the same customer
+    // (created at signup time, tagged in metadata). If present, we surface
+    // its details in the email block.
+    let setupInfo = null;
+    try {
+      const schedules = await stripeClient.subscriptionSchedules.list({
+        customer: customer.stripe_customer_id,
+        limit:    20,
+      });
+      const match = (schedules.data || []).find(s =>
+        s?.metadata?.subscription_id === subscription.name &&
+        s?.metadata?.kind === 'setup_installments' &&
+        ['active', 'not_started'].includes(s.status)
+      );
+      if (match) {
+        const phase = match.phases?.[0];
+        const item  = phase?.items?.[0];
+        const per   = item?.price?.unit_amount || 0;
+        const start = phase?.start_date ? new Date(phase.start_date * 1000) : new Date();
+        const end   = phase?.end_date   ? new Date(phase.end_date * 1000)   : null;
+        const months = end
+          ? Math.max(1, Math.round((end.getTime() - start.getTime()) / (30 * 24 * 60 * 60 * 1000)))
+          : 1;
+        setupInfo = {
+          totalCents:   per * months,
+          installments: months,
+          currency:     item?.price?.currency || 'usd',
+          label:        item?.price?.product?.name || 'Setup fee',
+        };
+      }
+    } catch (err) {
+      // Non-fatal — email goes out without the setup block.
+      console.warn('[signup/resendActivation] could not inspect setup schedule:', err.message);
+    }
+
+    const planName = subscription.plan_name
+      || stripeSub.items?.data?.[0]?.price?.product?.name
+      || 'your plan';
+
+    try {
+      if (stripeSub.status === 'trialing' || stripeSub.trial_end) {
+        await sendTrialStartEmail({
+          to:         customer.email,
+          tenantName: subscription.tenant_name,
+          planName,
+          trialEnd:   stripeSub.trial_end,
+          portalUrl,
+          setup:      setupInfo,
+        });
+      } else {
+        await sendScheduledStartEmail({
+          to:            customer.email,
+          tenantName:    subscription.tenant_name,
+          planName,
+          firstChargeAt: stripeSub.current_period_end || null,
+          portalUrl,
+          setup:         setupInfo,
+        });
+      }
+    } catch (err) {
+      console.error('[signup/resendActivation] email send failed:', err.message);
+      return { status: 502, success: false, message: `Email send failed: ${err.message}`, portal_url: portalUrl };
+    }
+
+    return {
+      status:     200,
+      success:    true,
+      message:    `Activation email re-sent to ${customer.email}.`,
+      portal_url: portalUrl,
+    };
+  }
 }
 
 /**

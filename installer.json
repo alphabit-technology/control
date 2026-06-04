@@ -1,7 +1,7 @@
 {
   "App": {
     "name": "control",
-    "version": "0.0.28"
+    "version": "0.0.29"
   },
   "documents": {
     "Entity:Module": {
@@ -14,7 +14,7 @@
       "type": "Web App",
       "name": "control",
       "description": "Loopar Cloud — control plane: billing, subscriptions and tenant administration",
-      "version": "0.0.27",
+      "version": "0.0.29",
       "autor": "alfredrz2012@gmail.com",
       "icon": "Cloud",
       "footer_height": "",
