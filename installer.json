@@ -1,7 +1,7 @@
 {
   "App": {
     "name": "control",
-    "version": "0.0.27"
+    "version": "0.0.28"
   },
   "documents": {
     "Entity:Module": {

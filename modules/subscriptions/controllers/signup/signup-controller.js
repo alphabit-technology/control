@@ -654,6 +654,32 @@ export default class SignupController extends BaseController {
       try {
         if (setupFeeInstallments > 1) {
           const perInstallmentCents = Math.round(setupFeeCents / setupFeeInstallments);
+          // Stripe rejects price_data.product_data inside subscriptionSchedules
+          // phases — it only accepts an existing product id. Create a one-off
+          // Product per schedule so the operator-chosen label survives onto
+          // the customer's invoices.
+          // Description is what the Customer Portal shows under the line item,
+          // so we use it to make the installments explicit ("4 × $400 = $1,600
+          // total, auto-cancels"). Without this the customer only sees one
+          // monthly amount and may think it's the whole charge.
+          const currencyUpper = (price.currency || 'usd').toUpperCase();
+          const perPretty   = (perInstallmentCents / 100).toFixed(2);
+          const totalPretty = (setupFeeCents / 100).toFixed(2);
+          const setupProduct = await stripeClient.products.create({
+            name: setupFeeLabel,
+            description:
+              `${setupFeeInstallments} monthly installments of ${currencyUpper} ${perPretty} ` +
+              `(total ${currencyUpper} ${totalPretty}). Auto-cancels after the final payment.`,
+            metadata: { ...metadata, kind: 'setup_installments' },
+          });
+          // Use end_date instead of iterations — `iterations` is rejected on
+          // older API versions; end_date works everywhere. N monthly intervals
+          // = N months from now.
+          const now = new Date();
+          const phaseEnd = new Date(now);
+          phaseEnd.setUTCMonth(phaseEnd.getUTCMonth() + setupFeeInstallments);
+          const phaseEndTs = Math.floor(phaseEnd.getTime() / 1000);
+
           const schedule = await stripeClient.subscriptionSchedules.create({
             customer:     customer.stripe_customer_id,
             start_date:   'now',
@@ -661,14 +687,14 @@ export default class SignupController extends BaseController {
             phases: [{
               items: [{
                 price_data: {
-                  currency:     (price.currency || 'usd'),
-                  product_data: { name: setupFeeLabel },
-                  unit_amount:  perInstallmentCents,
-                  recurring:    { interval: 'month' },
+                  currency:    (price.currency || 'usd'),
+                  product:     setupProduct.id,
+                  unit_amount: perInstallmentCents,
+                  recurring:   { interval: 'month' },
                 },
                 quantity: 1,
               }],
-              iterations: setupFeeInstallments,
+              end_date: phaseEndTs,
               metadata: { ...metadata, kind: 'setup_installments' },
             }],
             metadata: { ...metadata, kind: 'setup_installments' },
@@ -743,6 +769,17 @@ export default class SignupController extends BaseController {
     // Trial / scheduled: email the customer the portal link so they can add a
     // card before the first real charge. Checkout doesn't get an automatic
     // email — the operator forwards the Checkout URL directly.
+    //
+    // We also pass setup-fee info so the email can spell out installments
+    // explicitly (the Customer Portal only shows the next monthly amount,
+    // which can be misread as the total).
+    const setupInfo = setupFeeCents > 0 ? {
+      totalCents:   setupFeeCents,
+      installments: setupFeeInstallments,
+      currency:     (price.currency || 'usd'),
+      label:        setupFeeLabel,
+    } : null;
+
     if (portalUrl && (mode === 'trial' || mode === 'scheduled')) {
       try {
         if (mode === 'trial') {
@@ -752,6 +789,7 @@ export default class SignupController extends BaseController {
             planName,
             trialEnd:   stripeSub.trial_end,
             portalUrl,
+            setup:      setupInfo,
           });
         } else {
           // `current_period_end` on a scheduled Sub equals the billing anchor —
@@ -763,6 +801,7 @@ export default class SignupController extends BaseController {
             planName,
             firstChargeAt,
             portalUrl,
+            setup:      setupInfo,
           });
         }
       } catch (err) {
@@ -792,11 +831,38 @@ export default class SignupController extends BaseController {
 }
 
 /**
+ * Render an HTML block describing the setup fee, used as a callout in
+ * activation emails. Returns empty string when there's no fee.
+ */
+function renderSetupFeeBlock(setup) {
+  if (!setup || !setup.totalCents) return '';
+  const cur   = (setup.currency || 'usd').toUpperCase();
+  const total = (setup.totalCents / 100).toFixed(2);
+  const label = setup.label || 'Setup fee';
+
+  if (setup.installments > 1) {
+    const per = (setup.totalCents / setup.installments / 100).toFixed(2);
+    return `
+      <div style="background:#f6f8fa;border-radius:8px;padding:14px 16px;margin:20px 0;font-size:13px;color:#444">
+        <strong>${label}:</strong> ${cur} ${total} total, billed as
+        <strong>${setup.installments} monthly payments of ${cur} ${per}</strong>.
+        These run alongside your plan and end automatically after the last payment.
+      </div>
+    `;
+  }
+  return `
+    <div style="background:#f6f8fa;border-radius:8px;padding:14px 16px;margin:20px 0;font-size:13px;color:#444">
+      <strong>${label}:</strong> ${cur} ${total}, billed once on your first invoice.
+    </div>
+  `;
+}
+
+/**
  * Trial-start email — sent right after the operator opens a trial Subscription
  * for an existing tenant. Mirrors the "trial about to end" reminder that the
  * webhook handler sends, so customers get a consistent voice on both ends.
  */
-async function sendTrialStartEmail({ to, tenantName, planName, trialEnd, portalUrl }) {
+async function sendTrialStartEmail({ to, tenantName, planName, trialEnd, portalUrl, setup }) {
   const trialEndDate = trialEnd ? new Date(trialEnd * 1000).toUTCString() : 'a future date';
   const subject = `Your ${tenantName} workspace is on trial — add payment to continue`;
   const html = `
@@ -805,6 +871,7 @@ async function sendTrialStartEmail({ to, tenantName, planName, trialEnd, portalU
       <p>Your subscription to <strong>${planName}</strong> is now active in trial mode for <strong>${tenantName}</strong>.</p>
       <p>The trial ends on <strong>${trialEndDate}</strong>. To keep your workspace running without interruption,
          add a payment method before the trial ends:</p>
+      ${renderSetupFeeBlock(setup)}
       <p style="margin: 28px 0;">
         <a href="${portalUrl}"
            style="display:inline-block;background:#1D9E75;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:600">
@@ -829,7 +896,7 @@ async function sendTrialStartEmail({ to, tenantName, planName, trialEnd, portalU
  * with a future billing anchor for an existing tenant. The first charge
  * hasn't happened yet; the customer needs to add payment before then.
  */
-async function sendScheduledStartEmail({ to, tenantName, planName, firstChargeAt, portalUrl }) {
+async function sendScheduledStartEmail({ to, tenantName, planName, firstChargeAt, portalUrl, setup }) {
   const firstCharge = firstChargeAt
     ? new Date(firstChargeAt * 1000).toUTCString()
     : 'a scheduled future date';
@@ -839,6 +906,7 @@ async function sendScheduledStartEmail({ to, tenantName, planName, firstChargeAt
       <h2 style="margin: 0 0 16px 0;">Your subscription is scheduled</h2>
       <p>Your subscription to <strong>${planName}</strong> for <strong>${tenantName}</strong> is scheduled to start on <strong>${firstCharge}</strong>.</p>
       <p>Add a payment method now so Stripe can charge you on that date — without one, the subscription won't activate.</p>
+      ${renderSetupFeeBlock(setup)}
       <p style="margin: 28px 0;">
         <a href="${portalUrl}"
            style="display:inline-block;background:#1D9E75;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:600">
