@@ -1,7 +1,7 @@
 {
   "App": {
     "name": "control",
-    "version": "0.0.30"
+    "version": "0.0.32"
   },
   "documents": {
     "Entity:Module": {
@@ -14,7 +14,7 @@
       "type": "Web App",
       "name": "control",
       "description": "Loopar Cloud — control plane: billing, subscriptions and tenant administration",
-      "version": "0.0.30",
+      "version": "0.0.32",
       "autor": "alfredrz2012@gmail.com",
       "icon": "Cloud",
       "footer_height": "",
@@ -118,6 +118,9 @@
     "Entity:Subscription": {
       "__root__": "/apps/control/modules/subscriptions/entities/subscription"
     },
+    "Entity:Portal Link": {
+      "__root__": "/apps/control/modules/subscriptions/entities/portal-link"
+    },
     "Entity:Webhook Event": {
       "__root__": "/apps/control/modules/subscriptions/entities/webhook-event"
     },
@@ -165,6 +168,7 @@
     "Entity:Plan": "link",
     "Entity:Provisioned Tenant": "link",
     "Entity:Subscription": "link",
+    "Entity:Portal Link": "link",
     "Entity:Webhook Event": "link"
   }
 }

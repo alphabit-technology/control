@@ -6,6 +6,13 @@ import fs from 'fs';
 import path from 'pathe';
 import { cleanupCanceledTenants } from '../../lifecycle.js';
 import { runProvisioningRetrySweep } from '../../provisioning.js';
+import {
+  issuePortalLink,
+  inspectPortalLink,
+  markUsedIfFirstTime,
+  buildPortalLinkUrl,
+  controlPlaneBaseUrlFromReq,
+} from '../../portal-link-issuer.js';
 import {RESERVED_NAMES, SUBDOMAIN_RE, EMAIL_RE, PLANS_CACHE_TTL_MS, shapePrice, sortByOrder} from "./helper.js"
 
 let plansCache = { data: null, fetchedAt: 0 };
@@ -54,6 +61,145 @@ export default class SignupController extends BaseController {
       provisioning_step: subscription.provisioning_step || null,
       url,
     };
+  }
+
+  /**
+   * GET /api/Signup/openPortal?token=<token>
+   *
+   * Customer-facing entry point for the activation / billing portal emails.
+   * Validates the Portal Link token, mints a *fresh* Stripe portal session,
+   * and 302s the browser to it. Unlike a raw Stripe portal URL — which dies
+   * in roughly an hour — the token is good until the end of the billing
+   * cycle, so a customer who opens the email next morning still lands on a
+   * working portal.
+   *
+   * On invalid / expired / revoked → renders an inline HTML page with a
+   * "Email support" CTA. We pick the HTTP status (404/410/503) to be honest
+   * with bots and proxies.
+   *
+   * NB: writes directly to this.res (302 redirect or text/html), bypassing
+   * the JSON renderer. As soon as headersSent is true, renderAjax bails.
+   */
+  async publicActionOpenPortal() {
+    const token = String(this.query?.token || '').trim();
+    if (!token) {
+      return this._sendPortalErrorHtml('missing_token');
+    }
+
+    const inspection = await inspectPortalLink(token);
+    if (!inspection.ok) {
+      return this._sendPortalErrorHtml(inspection.reason);
+    }
+
+    const subscription = await loopar.getDocument(
+      'Subscription', inspection.link.subscription, null, { ifNotFound: null }
+    );
+    if (!subscription?.name) {
+      return this._sendPortalErrorHtml('subscription_gone');
+    }
+
+    const customer = subscription.customer
+      ? await loopar.getDocument('Customer', subscription.customer, null, { ifNotFound: null })
+      : null;
+    if (!customer?.stripe_customer_id) {
+      return this._sendPortalErrorHtml('customer_missing');
+    }
+
+    const account = await loopar.getDocument(
+      'Stripe Account', null, null, { ifNotFound: null }
+    );
+    if (!account?.secret_key) {
+      console.error('[signup/openPortal] Stripe Account is not configured');
+      return this._sendPortalErrorHtml('stripe_misconfigured');
+    }
+
+    let stripePortalUrl;
+    try {
+      const stripeClient = Stripe(account.secret_key);
+      const returnUrl = tenant.tenantUrl(subscription.tenant_name);
+      const session = await stripeClient.billingPortal.sessions.create({
+        customer:   customer.stripe_customer_id,
+        return_url: returnUrl,
+      });
+      stripePortalUrl = session.url;
+    } catch (err) {
+      console.error('[signup/openPortal] portal session failed:', err.message);
+      return this._sendPortalErrorHtml('stripe_failed');
+    }
+
+    // Audit-only (multi-use within the validity window).
+    await markUsedIfFirstTime(token);
+
+    this.res.redirect(302, stripePortalUrl);
+    return null;
+  }
+
+  /**
+   * Render the standalone "this link doesn't work" page. Self-contained
+   * HTML — no Loopar shell, since the customer probably isn't logged in
+   * and shouldn't see our admin UI chrome.
+   */
+  _sendPortalErrorHtml(reason) {
+    const titles = {
+      missing_token:        'Invalid link',
+      not_found:            'This link is not valid',
+      expired:              'This link has expired',
+      revoked:              'This link is no longer active',
+      subscription_gone:    'Subscription not found',
+      customer_missing:     'Customer record incomplete',
+      stripe_misconfigured: 'Service temporarily unavailable',
+      stripe_failed:        'Could not reach Stripe',
+    };
+    const messages = {
+      missing_token:        'The link you clicked is missing required information. If you got here from an email, the link may have been truncated — please copy the full URL from the email body.',
+      not_found:            'We could not find an activation link matching this URL. It may have been replaced by a newer one.',
+      expired:              'This activation link has expired. Reply to the email it came from and we will send you a fresh one right away.',
+      revoked:              'A newer activation email was sent to your inbox. Please check for the most recent one and use that link instead — only the latest is active.',
+      subscription_gone:    'The subscription this link pointed to no longer exists. Please contact us so we can sort it out.',
+      customer_missing:     'Your customer record is missing payment information. Please contact us — this is on our side, not yours.',
+      stripe_misconfigured: 'The billing service is temporarily unavailable. Please try again in a few minutes, or contact us if the problem persists.',
+      stripe_failed:        'We could not reach Stripe to open your billing portal. Please try again in a moment.',
+    };
+
+    const status = (reason === 'expired' || reason === 'revoked') ? 410
+                 : (reason === 'not_found' || reason === 'missing_token' || reason === 'subscription_gone') ? 404
+                 : 503;
+
+    const supportEmail = String(process.env.CONTROL_PLANE_SUPPORT_EMAIL || 'support@loopar.build');
+    const title   = titles[reason]   || 'Link error';
+    const message = messages[reason] || `Something went wrong (${reason}). Please contact support.`;
+    const subject = encodeURIComponent(`Help with my activation link (${reason})`);
+
+    const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${title} — Loopar</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif; background:#f6f8fa; margin:0; padding:40px 20px; color:#1a2333; }
+    .card { max-width:500px; margin:60px auto; background:#fff; border-radius:12px; padding:36px; box-shadow:0 1px 3px rgba(0,0,0,0.05); }
+    h1 { margin:0 0 14px 0; font-size:22px; }
+    p { margin:0 0 16px 0; line-height:1.55; color:#444; }
+    .actions { margin-top:28px; }
+    a.btn { display:inline-block; background:#1D9E75; color:#fff; padding:11px 22px; border-radius:6px; text-decoration:none; font-weight:600; }
+    .muted { color:#999; font-size:12px; margin-top:32px; text-align:center; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>${title}</h1>
+    <p>${message}</p>
+    <div class="actions">
+      <a class="btn" href="mailto:${supportEmail}?subject=${subject}">Email support</a>
+    </div>
+    <p class="muted">Reference: ${reason}</p>
+  </div>
+</body>
+</html>`;
+
+    this.res.status(status).set('Content-Type', 'text/html; charset=utf-8').send(html);
+    return null;
   }
 
   /**
@@ -747,28 +893,33 @@ export default class SignupController extends BaseController {
       return { status: 500, success: false, message: 'Subscription saved in Stripe but failed locally — reconcile manually' };
     }
 
-    // ---- Customer Portal link (for trial / scheduled) ------------------
-    let portalUrl = null;
-    if (stripeSub && customer.stripe_customer_id) {
+    // ---- Activation link (for trial / scheduled) ----------------------
+    // Mint a Portal Link tied to the billing-cycle end. The link is a
+    // stable Loopar URL that, when clicked, generates a fresh Stripe
+    // portal session — so the email button keeps working until end of
+    // period instead of expiring an hour after we send it.
+    let actionUrl     = null;
+    let linkExpiresAt = null;
+    if (stripeSub && customer.stripe_customer_id && (mode === 'trial' || mode === 'scheduled')) {
       try {
-        // Return URL after the customer finishes in the portal: their own
-        // workspace. tenantUrl handles .localhost vs real-domain composition.
-        const returnUrl = tenant.tenantUrl(tenantName);
-        const portalSession = await stripeClient.billingPortal.sessions.create({
-          customer:   customer.stripe_customer_id,
-          return_url: returnUrl,
-        });
-        portalUrl = portalSession.url;
+        const nowSec     = Math.floor(Date.now() / 1000);
+        const SEVEN_DAYS = 7 * 24 * 60 * 60;
+        linkExpiresAt = new Date(
+          ((stripeSub.current_period_end && stripeSub.current_period_end > nowSec)
+            ? stripeSub.current_period_end
+            : nowSec + SEVEN_DAYS) * 1000
+        );
+        const { token } = await issuePortalLink(subscription.name, linkExpiresAt);
+        actionUrl = buildPortalLinkUrl(token, controlPlaneBaseUrlFromReq(this.req));
       } catch (err) {
-        // Portal failures are non-fatal — the operator can re-fetch via a
-        // separate action later. Just log.
-        console.warn('[signup/createForExisting] billingPortal.sessions.create failed:', err.message);
+        // Non-fatal — the operator can re-issue via the Resend modal later.
+        console.warn('[signup/createForExisting] issuePortalLink failed:', err.message);
       }
     }
 
-    // Trial / scheduled: email the customer the portal link so they can add a
-    // card before the first real charge. Checkout doesn't get an automatic
-    // email — the operator forwards the Checkout URL directly.
+    // Trial / scheduled: email the customer the activation link so they can
+    // add a card before the first real charge. Checkout doesn't get an
+    // automatic email — the operator forwards the Checkout URL directly.
     //
     // We also pass setup-fee info so the email can spell out installments
     // explicitly (the Customer Portal only shows the next monthly amount,
@@ -780,28 +931,30 @@ export default class SignupController extends BaseController {
       label:        setupFeeLabel,
     } : null;
 
-    if (portalUrl && (mode === 'trial' || mode === 'scheduled')) {
+    if (actionUrl && (mode === 'trial' || mode === 'scheduled')) {
       try {
         if (mode === 'trial') {
           await sendTrialStartEmail({
-            to:         email,
+            to:            email,
             tenantName,
             planName,
-            trialEnd:   stripeSub.trial_end,
-            portalUrl,
-            setup:      setupInfo,
+            trialEnd:      stripeSub.trial_end,
+            actionUrl,
+            linkExpiresAt,
+            setup:         setupInfo,
           });
         } else {
           // `current_period_end` on a scheduled Sub equals the billing anchor —
           // i.e. when Stripe will attempt the first charge.
           const firstChargeAt = stripeSub.current_period_end || null;
           await sendScheduledStartEmail({
-            to:         email,
+            to:            email,
             tenantName,
             planName,
             firstChargeAt,
-            portalUrl,
-            setup:      setupInfo,
+            actionUrl,
+            linkExpiresAt,
+            setup:         setupInfo,
           });
         }
       } catch (err) {
@@ -818,7 +971,7 @@ export default class SignupController extends BaseController {
       stripe_status:    stripeSub?.status || null,
       trial_end:        stripeSub?.trial_end || null,
       checkout_url:     checkoutUrl,
-      portal_url:       portalUrl,
+      portal_url:       actionUrl,   // Loopar deep link (regenerates Stripe session on click)
       setup_schedule_id:        setupScheduleId,
       setup_fee_installments:   setupFeeCents > 0 ? setupFeeInstallments : 0,
       message:          mode === 'checkout'
@@ -908,20 +1061,6 @@ export default class SignupController extends BaseController {
     }
     const stripeClient = Stripe(secretKey);
 
-    // Fresh portal session — old ones expire after ~1h.
-    let portalUrl;
-    try {
-      const returnUrl = tenant.tenantUrl(subscription.tenant_name);
-      const portalSession = await stripeClient.billingPortal.sessions.create({
-        customer:   customer.stripe_customer_id,
-        return_url: returnUrl,
-      });
-      portalUrl = portalSession.url;
-    } catch (err) {
-      console.error('[signup/resendActivation] portal session failed:', err.message);
-      return { status: 502, success: false, message: `Could not create portal session: ${err.message}` };
-    }
-
     // Read the Stripe Sub so we know whether to send the trial or scheduled
     // copy, and so we can include the setup fee block when applicable.
     let stripeSub;
@@ -933,6 +1072,27 @@ export default class SignupController extends BaseController {
     } catch (err) {
       console.error('[signup/resendActivation] subscriptions.retrieve failed:', err.message);
       return { status: 502, success: false, message: `Could not load Stripe Subscription: ${err.message}` };
+    }
+
+    // Mint a fresh Portal Link tied to the billing cycle end. We don't create
+    // the Stripe portal session here anymore — that happens on click, so each
+    // visit gets a fresh session (no more "link expired after 1h" complaints).
+    // The token revokes any previous link for this sub, so the older email
+    // button goes dead the moment the operator sends a new one.
+    const nowSec        = Math.floor(Date.now() / 1000);
+    const SEVEN_DAYS    = 7 * 24 * 60 * 60;
+    const linkExpiresAt = new Date(
+      ((stripeSub.current_period_end && stripeSub.current_period_end > nowSec)
+        ? stripeSub.current_period_end
+        : nowSec + SEVEN_DAYS) * 1000
+    );
+    let actionUrl;
+    try {
+      const { token } = await issuePortalLink(subscription.name, linkExpiresAt);
+      actionUrl = buildPortalLinkUrl(token, controlPlaneBaseUrlFromReq(this.req));
+    } catch (err) {
+      console.error('[signup/resendActivation] issuePortalLink failed:', err.message);
+      return { status: 500, success: false, message: `Could not issue portal link: ${err.message}` };
     }
 
     // Look for a parallel setup-installments schedule on the same customer
@@ -977,22 +1137,24 @@ export default class SignupController extends BaseController {
     try {
       if (stripeSub.status === 'trialing' || stripeSub.trial_end) {
         await sendTrialStartEmail({
-          to:         customer.email,
-          tenantName: subscription.tenant_name,
+          to:            customer.email,
+          tenantName:    subscription.tenant_name,
           planName,
-          trialEnd:   stripeSub.trial_end,
-          portalUrl,
-          setup:      setupInfo,
+          trialEnd:      stripeSub.trial_end,
+          actionUrl,
+          linkExpiresAt,
+          setup:         setupInfo,
         });
       } else if (stripeSub.status === 'active') {
         // Customer is already paying — they lost their original link and need
         // the Portal back for invoice / payment / cancel actions.
         await sendPortalAccessEmail({
-          to:         customer.email,
-          tenantName: subscription.tenant_name,
+          to:            customer.email,
+          tenantName:    subscription.tenant_name,
           planName,
-          portalUrl,
-          setup:      setupInfo,
+          actionUrl,
+          linkExpiresAt,
+          setup:         setupInfo,
         });
       } else {
         await sendScheduledStartEmail({
@@ -1000,20 +1162,21 @@ export default class SignupController extends BaseController {
           tenantName:    subscription.tenant_name,
           planName,
           firstChargeAt: stripeSub.current_period_end || null,
-          portalUrl,
+          actionUrl,
+          linkExpiresAt,
           setup:         setupInfo,
         });
       }
     } catch (err) {
       console.error('[signup/resendActivation] email send failed:', err.message);
-      return { status: 502, success: false, message: `Email send failed: ${err.message}`, portal_url: portalUrl };
+      return { status: 502, success: false, message: `Email send failed: ${err.message}`, portal_url: actionUrl };
     }
 
     return {
       status:     200,
       success:    true,
       message:    `Activation email re-sent to ${customer.email}.`,
-      portal_url: portalUrl,
+      portal_url: actionUrl,   // kept legacy field name for the existing UI modal
     };
   }
 }
@@ -1050,7 +1213,7 @@ function renderSetupFeeBlock(setup) {
  * for an existing tenant. Mirrors the "trial about to end" reminder that the
  * webhook handler sends, so customers get a consistent voice on both ends.
  */
-async function sendTrialStartEmail({ to, tenantName, planName, trialEnd, portalUrl, setup }) {
+async function sendTrialStartEmail({ to, tenantName, planName, trialEnd, actionUrl, linkExpiresAt, setup }) {
   const trialEndDate = trialEnd ? new Date(trialEnd * 1000).toUTCString() : 'a future date';
   const subject = `Your ${tenantName} workspace is on trial — add payment to continue`;
   const html = `
@@ -1061,14 +1224,15 @@ async function sendTrialStartEmail({ to, tenantName, planName, trialEnd, portalU
          add a payment method before the trial ends:</p>
       ${renderSetupFeeBlock(setup)}
       <p style="margin: 28px 0;">
-        <a href="${portalUrl}"
+        <a href="${actionUrl}"
            style="display:inline-block;background:#1D9E75;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:600">
           Add payment method
         </a>
       </p>
+      ${renderLinkValidityHint(linkExpiresAt)}
       <p style="color:#666;font-size:13px">
         If the button doesn't work, copy this link into your browser:<br>
-        <span style="word-break: break-all">${portalUrl}</span>
+        <span style="word-break: break-all">${actionUrl}</span>
       </p>
       <hr style="border:none;border-top:1px solid #eee;margin:28px 0">
       <p style="color:#999;font-size:12px">
@@ -1084,7 +1248,7 @@ async function sendTrialStartEmail({ to, tenantName, planName, trialEnd, portalU
  * paying just fine; they just lost the original Portal link and need it back
  * to update payment, download invoices or cancel.
  */
-async function sendPortalAccessEmail({ to, tenantName, planName, portalUrl, setup }) {
+async function sendPortalAccessEmail({ to, tenantName, planName, actionUrl, linkExpiresAt, setup }) {
   const subject = `Your ${tenantName} billing portal`;
   const html = `
     <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif; max-width: 560px; margin: 0 auto; color: #222;">
@@ -1093,18 +1257,19 @@ async function sendPortalAccessEmail({ to, tenantName, planName, portalUrl, setu
       <p>From the portal you can update your payment method, download invoices, or cancel your subscription anytime.</p>
       ${renderSetupFeeBlock(setup)}
       <p style="margin: 28px 0;">
-        <a href="${portalUrl}"
+        <a href="${actionUrl}"
            style="display:inline-block;background:#1D9E75;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:600">
           Open billing portal
         </a>
       </p>
+      ${renderLinkValidityHint(linkExpiresAt)}
       <p style="color:#666;font-size:13px">
         If the button doesn't work, copy this link into your browser:<br>
-        <span style="word-break: break-all">${portalUrl}</span>
+        <span style="word-break: break-all">${actionUrl}</span>
       </p>
       <hr style="border:none;border-top:1px solid #eee;margin:28px 0">
       <p style="color:#999;font-size:12px">
-        This link expires after about an hour for security. If you need a new one, just reply and we'll send another.
+        If you need a fresh link after the date above, just reply and we'll send another.
       </p>
     </div>
   `;
@@ -1116,7 +1281,7 @@ async function sendPortalAccessEmail({ to, tenantName, planName, portalUrl, setu
  * with a future billing anchor for an existing tenant. The first charge
  * hasn't happened yet; the customer needs to add payment before then.
  */
-async function sendScheduledStartEmail({ to, tenantName, planName, firstChargeAt, portalUrl, setup }) {
+async function sendScheduledStartEmail({ to, tenantName, planName, firstChargeAt, actionUrl, linkExpiresAt, setup }) {
   const firstCharge = firstChargeAt
     ? new Date(firstChargeAt * 1000).toUTCString()
     : 'a scheduled future date';
@@ -1128,14 +1293,15 @@ async function sendScheduledStartEmail({ to, tenantName, planName, firstChargeAt
       <p>Add a payment method now so Stripe can charge you on that date — without one, the subscription won't activate.</p>
       ${renderSetupFeeBlock(setup)}
       <p style="margin: 28px 0;">
-        <a href="${portalUrl}"
+        <a href="${actionUrl}"
            style="display:inline-block;background:#1D9E75;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:600">
           Add payment method
         </a>
       </p>
+      ${renderLinkValidityHint(linkExpiresAt)}
       <p style="color:#666;font-size:13px">
         If the button doesn't work, copy this link into your browser:<br>
-        <span style="word-break: break-all">${portalUrl}</span>
+        <span style="word-break: break-all">${actionUrl}</span>
       </p>
       <hr style="border:none;border-top:1px solid #eee;margin:28px 0">
       <p style="color:#999;font-size:12px">
@@ -1144,4 +1310,21 @@ async function sendScheduledStartEmail({ to, tenantName, planName, firstChargeAt
     </div>
   `;
   return loopar.mail.send({ to, subject, html });
+}
+
+/**
+ * Small "Valid until <date>" hint shown right below the CTA button. Helps
+ * customers who archive emails know whether the link is still likely to work
+ * before they click. Renders nothing if no expiry was supplied.
+ */
+function renderLinkValidityHint(linkExpiresAt) {
+  if (!linkExpiresAt) return '';
+  let pretty;
+  try { pretty = new Date(linkExpiresAt).toUTCString(); }
+  catch (_) { return ''; }
+  return `
+    <p style="color:#888;font-size:12px;margin:-12px 0 18px 0;">
+      Link valid until <strong>${pretty}</strong>. After that, reply and we'll send a fresh one.
+    </p>
+  `;
 }
