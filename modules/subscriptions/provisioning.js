@@ -1,6 +1,8 @@
 'use strict';
 
 import { loopar, tenant, Op } from 'loopar';
+import { corePort } from 'loopar/core/config/core-config.js';
+import { installTenant } from 'loopar/bin/tenant/tenant-ops.js';
 import fs from 'fs';
 import path from 'pathe';
 import crypto from 'node:crypto';
@@ -118,9 +120,9 @@ function getVerifierUrl() {
   const controlTenant = loopar.tenantId || 'cloud';
 
   if (suffix === '.localhost') {
-    const controlPort =
-      process.env.PORT ||
-      tenant.readEnvFile(controlTenant)?.PORT;
+    // The control plane is served by the core; its callback URL uses the core
+    // port (all tenant domains route to the core).
+    const controlPort = process.env.PORT || corePort();
     if (controlPort) {
       return `${protocol}://${controlTenant}.localhost:${controlPort}/api/auth-claim/verify`;
     }
@@ -249,20 +251,17 @@ export async function provisionTenant(subscriptionName) {
   const domain = `${tenantName}${domainSuffix}`;
 
   try {
-    // ---- 1) allocate port -------------------------------------------------
-    emitProgress(subscriptionName, 'allocating', { tenant_name: tenantName });
-    await setSubscriptionStep(subscription, 'allocating');
+    // ---- 1) claim the tenant name ----------------------------------------
+    // No port anymore — every tenant is served by the core. Refuse if the
+    // tenant is already configured (config.json exists): another process won
+    // the race or it was hand-created.
+    emitProgress(subscriptionName, 'creating', { tenant_name: tenantName });
+    await setSubscriptionStep(subscription, 'creating');
 
-    // Refuse if the sites/<name>/ directory already exists with a real .env —
-    // means another process won the race or the tenant was hand-created.
     const sitesDir = path.join(process.cwd(), 'sites', tenantName);
-    if (fs.existsSync(path.join(sitesDir, '.env'))) {
-      throw new Error(`Tenant directory "${tenantName}" already exists`);
+    if (fs.existsSync(path.join(sitesDir, 'config.json'))) {
+      throw new Error(`Tenant "${tenantName}" already exists`);
     }
-
-    const port = tenant.allocateFreePort();
-    subscription.port = port;
-    await subscription.save({ validate: false });
 
     // ---- 2) issue magic-link claim token --------------------------------
     // We need the verifier_token BEFORE writing the .env so the new tenant
@@ -311,67 +310,65 @@ export async function provisionTenant(subscriptionName) {
       }
     }
 
-    // ---- 3..6) tenant bring-up — delegate to TenantManager.provision -----
-    // Single call writes the .env (with our custom CUSTOMER_EMAIL / CLOUD_*
-    // keys merged in), seeds db.config.json from the control plane, brings
-    // Caddy + PM2 online, waits for HTTP, and runs `/api/System/install`.
-    // Progress events are forwarded through emitProgress / setSubscriptionStep
-    // so the success page sees each step over realtime.
+    // ---- 3) create + activate the tenant ---------------------------------
+    // Writes sites/<name>/config.json (domain, status, cloud keys), seeds
+    // db.config.json from the control plane, routes the domain to the core,
+    // and marks the tenant active so it's reachable for the install below.
     const tenantDoc = await loopar.newDocument('Tenant Manager', {
-      id:       tenantName,
-      port,
+      id:     tenantName,
       domain,
-      node_env: process.env.NODE_ENV || 'development',
     });
     tenantDoc.name = tenantName;
 
-    // INSTALL_TOKEN: random per-tenant secret that the new tenant's installer
-    // endpoint validates against `X-Install-Token`. With it the install POST
-    // is no longer "anyone-who-reaches-the-port-first wins" — only this
-    // provisioning run (which holds the secret) can install loopar. After
-    // success we wipe the token from the .env (defense in depth; the
-    // installer also refuses re-installs once loopar.__installed__ flips).
+    // INSTALL_TOKEN: random secret the installer validates against
+    // `X-Install-Token`. NOTE (migration): the installer's gate must read the
+    // expected token from the tenant config now (no per-tenant process env) —
+    // verify SystemController before trusting this in production.
     const installToken = crypto.randomBytes(32).toString('hex');
+
+    emitProgress(subscriptionName, 'creating-tenant', { domain });
+    await setSubscriptionStep(subscription, 'creating-tenant');
 
     await tenantDoc.provision({
       env: {
         CUSTOMER_EMAIL:       customerEmail,
-        CLOUD_VERIFIER_URL:   claim ? getVerifierUrl()     : '',
         CLOUD_VERIFIER_TOKEN: claim ? claim.verifier_token : '',
+        // The tenant's callback target for verifying its own magic-link claim.
+        CLOUD_VERIFIER_URL:   claim ? getVerifierUrl() : '',
+        // Persisted into config.json so the in-core installer can read the
+        // expected token via `loopar.installToken`. Scrubbed right after the
+        // install succeeds (below) so it never lingers in the config.
         INSTALL_TOKEN:        installToken,
       },
-      // Source for the new tenant's db.config.json — we clone the control
-      // plane's template (SQLite today; could become a shared Postgres later
-      // by changing only the control plane's config).
+      // Clone the control plane's db.config.json template for the new tenant.
       dbConfigFrom: loopar.tenantId,
-      install:      true,
-      installPayload: {
+      activate:     true,
+    });
+
+    // ---- 4) headless install THROUGH the core ----------------------------
+    // The portless domain routes to the core, which initializes the tenant
+    // instance and runs its installer (creates schema + Administrator).
+    emitProgress(subscriptionName, 'installing-loopar', { domain });
+    await setSubscriptionStep(subscription, 'installing-loopar');
+
+    await installTenant({
+      domain,
+      token: installToken,
+      payload: {
         email:            customerEmail || '',
         company:          tenantName,
         admin_password:   '',
         confirm_password: '',
       },
-      installHeaders: {
-        'X-Install-Token': installToken,
-      },
-      onProgress: (step, payload) => {
-        emitProgress(subscriptionName, step, payload);
-        // Persist the step on the Subscription too, so a slow client that
-        // missed the realtime burst can still read progress via /signup/status.
-        // Fire-and-forget — a save failure must not stop provisioning.
-        setSubscriptionStep(subscription, step).catch(() => {});
-      },
     });
 
-    // Install succeeded — scrub INSTALL_TOKEN from the .env so a future
-    // restart can't reopen the install window. The live tenant process
-    // still has it in process.env until its next restart, but the system
-    // controller refuses to re-install once `loopar.__installed__` is true,
-    // so the token is already inert from a security standpoint.
+    // ---- 4b) scrub the one-shot install token ----------------------------
+    // The gate has served its purpose; drop it from config.json so a
+    // provisioned, installed tenant carries no lingering install secret.
     try {
-      await tenant.saveTenant({ name: tenantName, INSTALL_TOKEN: '' });
+      await tenant.saveTenant({ NAME: tenantName, INSTALL_TOKEN: '' });
     } catch (err) {
-      console.warn(`[provisioning] could not scrub INSTALL_TOKEN: ${err.message}`);
+      console.warn('[provisioning] could not scrub install token:', err.message);
     }
 
     // ---- 7) send magic-link email ----------------------------------------
@@ -406,16 +403,15 @@ export async function provisionTenant(subscriptionName) {
     subscription.provisioning_last_error  = null;
     await subscription.save({ validate: false });
 
-    const url = tenant.tenantUrl(tenantName, { domain, port });
+    const url = tenant.tenantUrl(tenantName, { domain });
 
     emitProgress(subscriptionName, 'ready', {
-      port,
       domain,
       url,
       magic_link_sent: !!(claim && customer?.email),
     });
 
-    console.log(`[provisioning] ${tenantName} ready on ${domain} (port ${port})`);
+    console.log(`[provisioning] ${tenantName} ready on ${domain}`);
     return true;
   } catch (err) {
     const attempts = priorAttempts + 1;

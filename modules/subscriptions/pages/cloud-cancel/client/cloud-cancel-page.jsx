@@ -1,6 +1,5 @@
 'use strict';
 
-import PageContext from '@context/page-context';
 import { Button } from '@cn/components/ui/button';
 import { XCircle, ArrowLeft } from 'lucide-react';
 import { Link } from '@link';
@@ -27,8 +26,7 @@ function CloudCancelUI() {
   );
 }
 
-export default class CloudCancelPage extends PageContext {
-  render() {
-    return <CloudCancelUI />;
-  }
+/** Standalone page: renders outside the document shell on purpose. */
+export default function CloudCancelPage() {
+  return <CloudCancelUI />;
 }

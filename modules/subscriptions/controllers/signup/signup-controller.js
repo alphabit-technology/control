@@ -314,7 +314,6 @@ export default class SignupController extends BaseController {
       }
     }
 
-    let port = null;
     if (isCloud) {
       if (!workspaceName) {
         return { status: 400, success: false, message: 'workspace_name is required for this plan' };
@@ -325,17 +324,10 @@ export default class SignupController extends BaseController {
       if (RESERVED_NAMES.has(workspaceName)) {
         return { status: 400, success: false, message: 'That workspace name is reserved' };
       }
+      // No port anymore — every tenant is served by the core. Just ensure the
+      // workspace name (folder) isn't taken.
       if (fs.existsSync(path.join(process.cwd(), 'sites', workspaceName))) {
         return { status: 400, success: false, message: 'That workspace name is already taken' };
-      }
-      // Two concurrent signups could pick the same port. Acceptable
-      // while signups are infrequent; under load, replace with a DB lock or
-      // a sequence. allocateFreePort scans the live tenant set under sites/.
-      try {
-        port = tenant.allocateFreePort();
-      } catch (err) {
-        console.error('[signup] allocateFreePort failed:', err.message);
-        return { status: 500, success: false, message: 'No free port available' };
       }
     }
 
@@ -371,7 +363,6 @@ export default class SignupController extends BaseController {
       subscription.status = 'pending';
       if (isCloud) {
         subscription.tenant_name = workspaceName;
-        subscription.port = port;
       }
       await subscription.save();
     } catch (err) {
@@ -521,8 +512,7 @@ export default class SignupController extends BaseController {
       if (!blocked) {
         available.push({
           name:   t.name,
-          domain: t.env?.DOMAIN || `${t.name}.localhost`,
-          port:   t.env?.PORT || null,
+          domain: t.domain || `${t.name}.localhost`,
         });
       }
     }
@@ -600,7 +590,7 @@ export default class SignupController extends BaseController {
     }
 
     // ---- tenant exists? -------------------------------------------------
-    if (!fs.existsSync(path.join(process.cwd(), 'sites', tenantName, '.env'))) {
+    if (!fs.existsSync(path.join(process.cwd(), 'sites', tenantName, 'config.json'))) {
       return { status: 404, success: false, message: `Tenant "${tenantName}" does not exist` };
     }
 

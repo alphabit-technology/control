@@ -1,7 +1,7 @@
 'use strict';
 
-import React from 'react';
-import ListContext from '@context/list-context';
+import { useState } from 'react';
+import { ListLayout } from '@loopar/list';
 import { Button } from '@cn/components/ui/button';
 import { Plus, Mail } from 'lucide-react';
 import CreateForExistingModal from './create-for-existing-modal';
@@ -16,58 +16,30 @@ import ResendActivationModal from './resend-activation-modal';
  *     and re-send the activation email for a Sub that's still waiting on a
  *     payment method. Backend: actionResendActivationEmail.
  */
-export default class SubscriptionList extends ListContext {
-  constructor(props) {
-    super(props);
-    this.state = {
-      ...(this.state || {}),
-      createModalOpen: false,
-      resendModalOpen: false,
-    };
-    this.openCreateModal  = () => this.setState({ createModalOpen: true });
-    this.closeCreateModal = () => this.setState({ createModalOpen: false });
-    this.openResendModal  = () => this.setState({ resendModalOpen: true });
-    this.closeResendModal = () => this.setState({ resendModalOpen: false });
-  }
+export default function SubscriptionList() {
+  const [createModalOpen, setCreateModalOpen] = useState(false);
+  const [resendModalOpen, setResendModalOpen] = useState(false);
 
-  setCustomActions() {
-    this.setCustomAction('newForExistingTenant', (
-      <Button
-        key="newForExistingTenant"
-        onClick={this.openCreateModal}
-        size="sm"
-      >
+  const actions = {
+    newForExistingTenant: (
+      <Button key="newForExistingTenant" onClick={() => setCreateModalOpen(true)} size="sm">
         <Plus className="h-4 w-4 mr-1" />
         New for existing tenant
       </Button>
-    ));
-
-    this.setCustomAction('resendActivation', (
-      <Button
-        key="resendActivation"
-        onClick={this.openResendModal}
-        size="sm"
-        variant="outline"
-      >
+    ),
+    resendActivation: (
+      <Button key="resendActivation" onClick={() => setResendModalOpen(true)} size="sm" variant="outline">
         <Mail className="h-4 w-4 mr-1" />
         Resend activation email
       </Button>
-    ));
-  }
+    ),
+  };
 
-  render(content, slots) {
-    return (
-      <>
-        {super.render(content, slots)}
-        <CreateForExistingModal
-          open={!!this.state?.createModalOpen}
-          onClose={this.closeCreateModal}
-        />
-        <ResendActivationModal
-          open={!!this.state?.resendModalOpen}
-          onClose={this.closeResendModal}
-        />
-      </>
-    );
-  }
+  return (
+    <>
+      <ListLayout actions={actions} />
+      <CreateForExistingModal open={createModalOpen} onClose={() => setCreateModalOpen(false)} />
+      <ResendActivationModal open={resendModalOpen} onClose={() => setResendModalOpen(false)} />
+    </>
+  );
 }
